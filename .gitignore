@@ -1,0 +1,27 @@
+# mac os
+.DS_Store
+
+# py cache
+.pytest_cache/
+.python-version
+
+# virtul env
+.venv/
+
+# python
+*.pyc
+__pycache__/
+
+# uv
+.uv/
+
+# build
+dist/
+build/
+*.egg-info/
+
+# output file
+output/
+
+
+

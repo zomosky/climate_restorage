@@ -48,6 +48,10 @@ class HeightSuffixRule:
     - Variables whose name already matches ``keep_pattern`` (e.g. ``u10``,
       ``t2m``, ``sh2``) keep their original name. Everything else gets
       ``<var><level><unit>`` appended (e.g. ``pres`` @80m -> ``pres80m``).
+    - Non-instant ``step_type`` then appends ``_<step_type>`` to every
+      output name. This disambiguates e.g. IFS ``fg10`` (max wind gust at
+      10 m) from ``u10`` (instant wind) and lets the same shortName ship
+      under multiple stepTypes without colliding (``mx2t3`` -> ``mx2t3_max``).
     """
 
     unit: str = "m"
@@ -61,10 +65,15 @@ class HeightSuffixRule:
                     type_of_level, errors="ignore"
                 )
                 outs.append(self._rename_scalar(sub, float(lvl)))
-            return outs
-        lvl = float(ds[type_of_level].values) if type_of_level in ds.coords else 0.0
-        ds = _drop_level_coord(ds, type_of_level)
-        return [self._rename_scalar(ds, lvl)]
+        else:
+            lvl = float(ds[type_of_level].values) if type_of_level in ds.coords else 0.0
+            ds = _drop_level_coord(ds, type_of_level)
+            outs = [self._rename_scalar(ds, lvl)]
+        if step_type != "instant":
+            outs = [
+                s.rename({v: f"{v}_{step_type}" for v in s.data_vars}) for s in outs
+            ]
+        return outs
 
     def _rename_scalar(self, ds: xr.Dataset, level: float) -> xr.Dataset:
         suffix = f"{int(level)}{self.unit}"

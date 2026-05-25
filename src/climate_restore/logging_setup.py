@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import sys
-import warnings
 
 import structlog
 
@@ -14,7 +13,6 @@ def configure_logging(level: str = "INFO") -> None:
     logging.basicConfig(format="%(message)s", stream=sys.stderr, level=log_level)
     for noisy in ("httpx", "httpcore", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    warnings.filterwarnings("ignore", category=FutureWarning, module="cfgrib")
 
     structlog.configure(
         processors=[

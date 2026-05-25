@@ -38,18 +38,18 @@ uv run climate_restore watch \
     --source gfs-0p25 --interval 30
 ```
 
-产物路径：
+产物路径（扁平：filename 已经带 `<date>_<cycle>z_<source>`，所以一次起报落一个文件即可）：
 
 ```
-<output_dir>/<source>/<date>/<cycle>z/<date>_<cycle>z_<source>.nc
-# e.g. output/gfs-0p25/20260501/12z/20260501_12z_gfs-0p25.nc
+<output_dir>/<source>/<date>_<cycle>z_<source>.nc
+# e.g. output/gfs-0p25/20260501_12z_gfs-0p25.nc
 ```
 
 读取示例：
 
 ```python
 import xarray as xr
-ds = xr.open_dataset("output/gfs-0p25/20260501/12z/20260501_12z_gfs-0p25.nc")
+ds = xr.open_dataset("output/gfs-0p25/20260501_12z_gfs-0p25.nc")
 ds["u10"].sel(latitude=slice(20, 40), longitude=slice(100, 120))   # (step, lat, lon)
 ds["t"].sel(pressure_level=850)                                      # 压力层取片
 ds.valid_time.values                                                 # 每个 step 的绝对时刻
@@ -66,9 +66,10 @@ download_root: ../download                 # download 项目根；manifest 路�
 output_dir: output                         # .nc 输出根目录
 bbox: [70.0, 140.0, 15.0, 55.0]            # west, east, south, north
 verify_sha256: false                       # true 时全文件哈希校验（慢）
+workers: 4                                 # 并行解码 GRIB 的进程数；1 关闭进程池
 ```
 
-所有字段都可被 CLI flag 覆盖：`--download-root` / `--output-dir` / `--bbox 70,140,15,55` / `--verify-sha256`。
+所有字段都可被 CLI flag 覆盖：`--download-root` / `--output-dir` / `--bbox 70,140,15,55` / `--verify-sha256` / `--workers`。
 
 ---
 
@@ -90,7 +91,8 @@ climate_restore list-sources
 | `--bbox W,E,S,N` | 覆盖裁剪框 |
 | `--source-type NAME` | 强制使用某个 adapter（默认看 `manifest.source.name`） |
 | `--verify-sha256` | 启用 sha256 校验（默认只查 size） |
-| `--log-level LVL` | 日志级别（默认 INFO，JSON 行格式输出到 stderr） |
+| `--workers N` | 覆盖 YAML 的 `workers`（默认 `min(cpu_count, 4)`；`1` 关闭进程池）。85 文件实测：1→70s、4→23s、8→13s |
+| `--log-level LVL` | 日志级别（默认 INFO，JSON 行格式输出到 stderr；TTY 下会显示 tqdm 进度条） |
 
 ---
 
@@ -173,4 +175,4 @@ uv run pytest -q
 
 - `tests/test_rules.py` — 五个 Rule 类的单元测试（in-memory `xr.Dataset`，不依赖 GRIB）
 - `tests/test_registry.py` — 注册 / 查找 / 重名抛错 / 排序
-- `tests/test_gfs_golden.py` — 对 `../download/output/.../f001.subset.grib2` 跑 GFS adapter，断言产出的变量名集合（fixture 缺失时自动 skip）
+- `tests/test_gfs_golden.py` — 对 `../download/output/.../f001.subset.grib2` 跑 GFS adapter，断言产出的变量名集合（fixture 缺失时自动 skip）z

@@ -69,4 +69,6 @@ class AifsAdapter(BaseAdapter):
         "highCloudLayer": PrefixToSuffixRule(),
         "mediumCloudLayer": PrefixToSuffixRule(),
         "lowCloudLayer": PrefixToSuffixRule(),
+        "mostUnstableParcel": PassthroughRule(),
+        "nominalTop": StepTypeSuffixRule(),
     }

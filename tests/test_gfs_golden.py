@@ -38,10 +38,10 @@ EXPECTED_VARIABLES: set[str] = {
     "gh", "r", "t", "u", "v",
     # Surface single-layer
     "prmsl", "pwat",
-    # Surface instant / time-aggregated
+    # Surface instant / time-aggregated (stepType suffix applied per-var)
     "prate", "prate_avg",
-    "sp", "t_sfc", "tp",
-    "sdlwrf", "sdswrf", "sulwrf", "suswrf",
+    "sp", "t_sfc", "tp_accum",
+    "sdlwrf_avg", "sdswrf_avg", "sulwrf_avg", "suswrf_avg",
     # Cloud layers + atmospheric total cloud cover (instant + avg)
     "hcc", "hcc_avg",
     "mcc", "mcc_avg",

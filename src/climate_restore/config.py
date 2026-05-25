@@ -7,6 +7,7 @@ A job YAML is *optional* — the simplest workflow is just
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -15,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 BBoxTuple = tuple[float, float, float, float]
+DEFAULT_WORKERS: int = min(os.cpu_count() or 1, 4)
 
 
 class JobConfig(BaseModel):
@@ -28,6 +30,7 @@ class JobConfig(BaseModel):
     output_dir: where to write produced ``.nc`` files.
     bbox: spatial crop window as (west, east, south, north) in degrees.
     verify_sha256: if true, also verify sha256 (slow) on top of size check.
+    workers: parallel decode workers; ``1`` disables the process pool.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -36,6 +39,7 @@ class JobConfig(BaseModel):
     output_dir: Path = Field(default=Path("output"))
     bbox: BBoxTuple = (70.0, 140.0, 15.0, 55.0)
     verify_sha256: bool = False
+    workers: int = Field(default=DEFAULT_WORKERS, ge=1)
 
     @field_validator("bbox")
     @classmethod

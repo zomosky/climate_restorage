@@ -9,7 +9,7 @@ from pathlib import Path
 from .config import JobConfig, load_job, parse_bbox_str
 from .logging_setup import configure_logging, get_logger
 from .manifest import Manifest, load_manifest, verify
-from .processor import DEFAULT_BBOX, process_init
+from .processor import DEFAULT_BBOX, DEFAULT_WORKERS, process_init
 from .sources import get_source, list_sources
 from .sources.base import BaseAdapter
 from .watcher import watch_manifests
@@ -36,9 +36,10 @@ def _resolve_download_root(cli_value: Path | None, job: JobConfig, manifest_path
 
 
 def _out_path(output_dir: Path, manifest: Manifest) -> Path:
-    cycle = f"{manifest.cycle:02d}z"
-    fname = f"{manifest.date}_{cycle}_{manifest.source_name}.nc"
-    return (output_dir / manifest.source_name / manifest.date / cycle / fname).resolve()
+    # Flat layout: filename already encodes ``<date>_<cycle>z_<source>``,
+    # so a per-source folder is enough to keep different inits separated.
+    fname = f"{manifest.date}_{manifest.cycle:02d}z_{manifest.source_name}.nc"
+    return (output_dir / manifest.source_name / fname).resolve()
 
 
 def _resolve_adapter(manifest: Manifest, cli_source_type: str | None) -> BaseAdapter:
@@ -51,7 +52,7 @@ def _resolve_adapter(manifest: Manifest, cli_source_type: str | None) -> BaseAda
     """
     key = cli_source_type or manifest.source_name
     adapter_cls = get_source(key)
-    return adapter_cls()
+    return adapter_cls(name=key)
 
 
 def _process_one(
@@ -63,11 +64,13 @@ def _process_one(
     cli_bbox: tuple[float, float, float, float] | None,
     cli_source_type: str | None,
     verify_sha256: bool,
+    cli_workers: int | None,
 ) -> Path:
     manifest = load_manifest(manifest_path)
     download_root = _resolve_download_root(cli_download_root, job, manifest_path)
     output_dir = (cli_output_dir or job.output_dir).resolve()
     bbox = cli_bbox or job.bbox
+    workers = cli_workers if cli_workers is not None else job.workers
     adapter = _resolve_adapter(manifest, cli_source_type)
 
     _log.info(
@@ -84,7 +87,9 @@ def _process_one(
     _log.info("verify_ok", files=len(grib_paths))
 
     out_path = _out_path(output_dir, manifest)
-    variables = process_init(grib_paths, adapter=adapter, bbox=bbox, out_path=out_path)
+    variables = process_init(
+        grib_paths, adapter=adapter, bbox=bbox, out_path=out_path, workers=workers
+    )
     _log.info("done", out_path=str(out_path), variables=variables)
     return out_path
 
@@ -111,6 +116,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         cli_bbox=_cli_bbox(args),
         cli_source_type=args.source_type,
         verify_sha256=args.verify_sha256,
+        cli_workers=args.workers,
     )
     print(out)
     return 0
@@ -137,6 +143,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 cli_bbox=_cli_bbox(args),
                 cli_source_type=args.source_type,
                 verify_sha256=args.verify_sha256,
+                cli_workers=args.workers,
             )
         except Exception as exc:
             _log.error("process_failed", manifest=str(manifest_path), error=str(exc))
@@ -158,6 +165,9 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="override the source adapter (default: manifest source.name)")
     p.add_argument("--verify-sha256", action="store_true",
                    help="also verify sha256 (slower) in addition to size check")
+    p.add_argument("--workers", type=int, default=None,
+                   help=f"parallel decode workers; overrides job YAML "
+                        f"(YAML default {DEFAULT_WORKERS}; set 1 to disable the pool)")
     p.add_argument("--log-level", default="INFO")
 
 

@@ -6,8 +6,12 @@
 #       --config config/jobs/gfs_china.yaml \
 #       --manifest ../download/output/gfs-0p25/20260501/12z/20260501_12z_gfs-0p25.manifest.json
 
-download_root: ../download
-output_dir: output
+#download_root: ../download
+#output_dir: output
+
+download_root: /Users/zmy/pycharm/climate_pipeline/climate_data
+output_dir: /Users/zmy/pycharm/climate_pipeline/climate_data_storage
 bbox: [70.0, 140.0, 15.0, 55.0]  # west, east, south, north (China region)
 verify_sha256: false
-workers: 4  # parallel GRIB decode processes; 1 to disable pool
+# workers: 4  # parallel GRIB decode processes; 1 to disable pool
+workers: 10

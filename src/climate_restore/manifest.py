@@ -1,15 +1,16 @@
 """Load and verify download-side manifest.json files.
 
 The download sub-project writes one manifest per (date, cycle) with
-``schema_version=1`` and a ``files[]`` array carrying ``path``,
-``size_bytes`` and ``sha256``. We treat the presence of ``completed_at``
-+ all listed files matching size (optionally sha256) as the trigger
-condition for downstream processing.
+``schema_version=1``, a ``files[]`` array of step files and a top-level
+``failures[]`` array. A download is considered usable iff
+``completed_at`` is set and ``failures`` is empty; per-file size/sha
+fields are no longer trusted (they may be placeholders while the
+manifest is being refreshed). Actual file readability is left to the
+cfgrib open step in the processor.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,7 @@ class Manifest:
     completed_at: str | None
     variables: list[dict[str, Any]]
     files: list[ManifestFile]
+    failures: list[Any]
     manifest_path: Path
 
     @property
@@ -43,6 +45,19 @@ class Manifest:
         recorded relative to the download project root, so we also need a
         ``download_root`` for absolute resolution."""
         return self.manifest_path.parent
+
+
+class ManifestHasFailures(Exception):
+    """Raised by :func:`verify` when the manifest reports download-side
+    failures. Carries the original ``failures`` payload so the caller can
+    log it and decide to skip the manifest."""
+
+    def __init__(self, manifest_path: Path, failures: list[Any]) -> None:
+        self.manifest_path = manifest_path
+        self.failures = failures
+        super().__init__(
+            f"manifest {manifest_path} reports {len(failures)} failure(s)"
+        )
 
 
 def load_manifest(manifest_path: Path) -> Manifest:
@@ -71,6 +86,7 @@ def load_manifest(manifest_path: Path) -> Manifest:
         completed_at=raw.get("completed_at"),
         variables=list(raw.get("variables", [])),
         files=files,
+        failures=list(raw.get("failures", [])),
         manifest_path=Path(manifest_path).resolve(),
     )
 
@@ -91,43 +107,35 @@ def resolve_file(manifest: Manifest, download_root: Path, entry: ManifestFile) -
     return cand
 
 
-def _sha256_of(path: Path, *, chunk: int = 1024 * 1024) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for block in iter(lambda: f.read(chunk), b""):
-            h.update(block)
-    return h.hexdigest()
-
-
 def verify(
     manifest: Manifest,
     download_root: Path,
     *,
-    check_sha256: bool = False,
+    check_sha256: bool = False,  # accepted for backward compat; ignored
 ) -> list[Path]:
-    """Verify every file in the manifest exists and matches size (and
-    optionally sha256). Returns the list of resolved absolute paths
-    in step order. Raises ``FileNotFoundError`` / ``ValueError`` on
-    the first failure."""
+    """Resolve and return the manifest's step files in step order.
+
+    Completion gate: a manifest is considered usable only when
+    ``completed_at`` is set and ``failures`` is empty. If ``failures`` is
+    non-empty, :class:`ManifestHasFailures` is raised so the batch driver
+    can log the payload and skip the init.
+
+    File-level size / sha256 fields are not checked here -- they may be
+    placeholder values while the manifest is being refreshed. Actual file
+    readability is left to the cropping step which opens each GRIB via
+    cfgrib; any unreadable file naturally fails there with a clear error.
+    """
+    del check_sha256  # no longer used
     if manifest.completed_at is None:
         raise ValueError(
             f"manifest {manifest.manifest_path} has no completed_at; download not finished"
         )
+    if manifest.failures:
+        raise ManifestHasFailures(manifest.manifest_path, manifest.failures)
     resolved: list[Path] = []
     for entry in manifest.files:
         abs_path = resolve_file(manifest, download_root, entry)
         if not abs_path.is_file():
             raise FileNotFoundError(f"manifest file missing on disk: {abs_path}")
-        size = abs_path.stat().st_size
-        if size != entry.size_bytes:
-            raise ValueError(
-                f"size mismatch for {abs_path}: expected {entry.size_bytes}, got {size}"
-            )
-        if check_sha256:
-            actual = _sha256_of(abs_path)
-            if actual != entry.sha256:
-                raise ValueError(
-                    f"sha256 mismatch for {abs_path}: expected {entry.sha256}, got {actual}"
-                )
         resolved.append(abs_path)
     return resolved

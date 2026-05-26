@@ -12,13 +12,13 @@ def discover_manifests(
     *,
     source: str | None = None,
 ) -> list[Path]:
-    """Find every ``*.manifest.json`` under ``download_root/output``.
+    """Find every ``*.manifest.json`` under ``download_root``.
 
     The download sub-project lays out output as
-    ``output/<source>/<date>/<cycle>z/<date>_<cycle>z_<source>.manifest.json``.
+    ``<source>/<date>/<cycle>z/<date>_<cycle>z_<source>.manifest.json``.
     If ``source`` is given, only that source subtree is scanned.
     """
-    base = (download_root / "output").resolve()
+    base = Path(download_root).resolve()
     if not base.is_dir():
         return []
     if source:

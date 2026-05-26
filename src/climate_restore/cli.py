@@ -17,21 +17,9 @@ from .watcher import watch_manifests
 _log = get_logger(__name__)
 
 
-def _auto_download_root(manifest_path: Path) -> Path | None:
-    """Walk up from a manifest path looking for an ``output`` directory; its
-    parent is the download project root."""
-    for parent in manifest_path.resolve().parents:
-        if parent.name == "output" and parent.parent.is_dir():
-            return parent.parent
-    return None
-
-
 def _resolve_download_root(cli_value: Path | None, job: JobConfig, manifest_path: Path) -> Path:
     if cli_value is not None:
         return cli_value.resolve()
-    auto = _auto_download_root(manifest_path)
-    if auto is not None:
-        return auto
     return job.download_root.resolve()
 
 

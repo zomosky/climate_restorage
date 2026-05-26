@@ -10,12 +10,14 @@ dependencies = [
     "cfgrib>=0.9.15.1",
     "eccodeslib>=2.46.2.19",
     "netcdf4>=1.7.4",
+    "numcodecs>=0.16.5",
     "numpy>=2.4.4",
     "pydantic>=2.13.4",
     "pyyaml>=6.0.3",
     "structlog>=25.5.0",
     "tqdm>=4.67.3",
     "xarray>=2026.4.0",
+    "zarr>=3.1.6",
 ]
 
 [project.scripts]

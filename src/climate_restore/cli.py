@@ -6,10 +6,21 @@ import argparse
 import sys
 from pathlib import Path
 
-from .config import JobConfig, load_job, parse_bbox_str
+from .config import (
+    JobConfig,
+    OutputFormat,
+    load_job,
+    parse_bbox_str,
+    parse_chunks_str,
+)
 from .logging_setup import configure_logging, get_logger
 from .manifest import Manifest, load_manifest, verify
-from .processor import DEFAULT_BBOX, DEFAULT_WORKERS, process_init
+from .processor import (
+    DEFAULT_BBOX,
+    DEFAULT_WORKERS,
+    format_suffix,
+    process_init,
+)
 from .sources import get_source, list_sources
 from .sources.base import BaseAdapter
 from .watcher import watch_manifests
@@ -23,10 +34,10 @@ def _resolve_download_root(cli_value: Path | None, job: JobConfig, manifest_path
     return job.download_root.resolve()
 
 
-def _out_path(output_dir: Path, manifest: Manifest) -> Path:
+def _out_path(output_dir: Path, manifest: Manifest, fmt: OutputFormat) -> Path:
     # Flat layout: filename already encodes ``<date>_<cycle>z_<source>``,
     # so a per-source folder is enough to keep different inits separated.
-    fname = f"{manifest.date}_{manifest.cycle:02d}z_{manifest.source_name}.nc"
+    fname = f"{manifest.date}_{manifest.cycle:02d}z_{manifest.source_name}{format_suffix(fmt)}"
     return (output_dir / manifest.source_name / fname).resolve()
 
 
@@ -53,12 +64,18 @@ def _process_one(
     cli_source_type: str | None,
     verify_sha256: bool,
     cli_workers: int | None,
+    cli_output_format: OutputFormat | None,
+    cli_zarr_chunks: dict[str, int] | None,
 ) -> Path:
     manifest = load_manifest(manifest_path)
     download_root = _resolve_download_root(cli_download_root, job, manifest_path)
     output_dir = (cli_output_dir or job.output_dir).resolve()
     bbox = cli_bbox or job.bbox
     workers = cli_workers if cli_workers is not None else job.workers
+    output_format = cli_output_format or job.output_format
+    zarr_options = job.zarr.model_copy()
+    if cli_zarr_chunks is not None:
+        zarr_options = zarr_options.model_copy(update={"chunks": cli_zarr_chunks})
     adapter = _resolve_adapter(manifest, cli_source_type)
 
     _log.info(
@@ -74,9 +91,15 @@ def _process_one(
     grib_paths = verify(manifest, download_root, check_sha256=verify_sha256)
     _log.info("verify_ok", files=len(grib_paths))
 
-    out_path = _out_path(output_dir, manifest)
+    out_path = _out_path(output_dir, manifest, output_format)
     variables = process_init(
-        grib_paths, adapter=adapter, bbox=bbox, out_path=out_path, workers=workers
+        grib_paths,
+        adapter=adapter,
+        bbox=bbox,
+        out_path=out_path,
+        workers=workers,
+        output_format=output_format,
+        zarr_options=zarr_options,
     )
     _log.info("done", out_path=str(out_path), variables=variables)
     return out_path
@@ -94,6 +117,13 @@ def _cli_bbox(args: argparse.Namespace) -> tuple[float, float, float, float] | N
     return None
 
 
+def _cli_zarr_chunks(args: argparse.Namespace) -> dict[str, int] | None:
+    raw = getattr(args, "zarr_chunks", None)
+    if not raw:
+        return None
+    return parse_chunks_str(raw)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     job = _load_job(args)
     out = _process_one(
@@ -105,6 +135,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         cli_source_type=args.source_type,
         verify_sha256=args.verify_sha256,
         cli_workers=args.workers,
+        cli_output_format=args.output_format,
+        cli_zarr_chunks=_cli_zarr_chunks(args),
     )
     print(out)
     return 0
@@ -132,6 +164,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 cli_source_type=args.source_type,
                 verify_sha256=args.verify_sha256,
                 cli_workers=args.workers,
+                cli_output_format=args.output_format,
+                cli_zarr_chunks=_cli_zarr_chunks(args),
             )
         except Exception as exc:
             _log.error("process_failed", manifest=str(manifest_path), error=str(exc))
@@ -147,7 +181,7 @@ def cmd_list_sources(args: argparse.Namespace) -> int:
 def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--config", help="optional job YAML")
     p.add_argument("--download-root", help="path to download project root")
-    p.add_argument("--output-dir", help="where to write .nc outputs")
+    p.add_argument("--output-dir", help="where to write outputs (.nc / .zarr)")
     p.add_argument("--bbox", help="west,east,south,north (degrees), overrides job/default")
     p.add_argument("--source-type",
                    help="override the source adapter (default: manifest source.name)")
@@ -156,6 +190,11 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--workers", type=int, default=None,
                    help=f"parallel decode workers; overrides job YAML "
                         f"(YAML default {DEFAULT_WORKERS}; set 1 to disable the pool)")
+    p.add_argument("--output-format", choices=("netcdf", "zarr"), default=None,
+                   help="output writer; overrides job YAML (default: netcdf)")
+    p.add_argument("--zarr-chunks", default=None,
+                   help="comma list of dim=size for zarr chunking, e.g. "
+                        "'step=-1,latitude=64,longitude=64'; -1 means 'whole dim'")
     p.add_argument("--log-level", default="INFO")
 
 

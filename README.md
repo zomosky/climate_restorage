@@ -1,10 +1,8 @@
 # climate_restore
 
-气象数据的再加工子项目，把下载后输出的多 step `*.subset.grib2` 文件按一次起报（`date + cycle`）合并成 **一个扁平 NetCDF**：裁剪到中国区域、按 step 时间拼接、所有变量重命名为阅读友好的 shortName 风格。
+气象数据的再加工子项目，把下载后输出的多 step `*.subset.grib2` 文件按一次起报（`date + cycle`）合并成 **一个扁平 NetCDF / Zarr**：裁剪到中国区域、按 step 时间拼接、所有变量重命名为阅读友好的 shortName 风格。
 
-*后续优化* 一步到位直出**zarr**，适配下游使用还需要较多时间。
-
-下游可以直接 `xr.open_dataset(...)['u100m']` 拿到 `(step, lat, lon)` 的整段时间序列，无需再处理 GRIB / cfgrib。
+输出格式可在 YAML 或 CLI 切换（`output_format: netcdf | zarr`），下游可直接 `xr.open_dataset(...)['u100m']` 或 `xr.open_zarr(...)['u100m']` 拿到 `(step, lat, lon)` 的整段时间序列，无需再处理 GRIB / cfgrib。
 
 ---
 
@@ -63,13 +61,47 @@ ds.valid_time.values                                                 # 每个 st
 
 ```yaml
 download_root: ../download                 # download 项目根；manifest 路径可自动反推
-output_dir: output                         # .nc 输出根目录
+output_dir: output                         # 输出根目录（.nc 或 .zarr 落于其下）
 bbox: [70.0, 140.0, 15.0, 55.0]            # west, east, south, north
 verify_sha256: false                       # true 时全文件哈希校验（慢）
 workers: 4                                 # 并行解码 GRIB 的进程数；1 关闭进程池
+output_format: netcdf                      # netcdf (默认, .nc) | zarr (.zarr 目录)
+zarr:                                      # 仅 output_format=zarr 时生效
+  chunks: {step: -1, latitude: 64, longitude: 64, pressure_level: -1}
+  compressor: zstd                         # zstd | lz4 | blosclz | zlib | none
+  clevel: 3
+  consolidated: true
+  zarr_format: 2
 ```
 
-所有字段都可被 CLI flag 覆盖：`--download-root` / `--output-dir` / `--bbox 70,140,15,55` / `--verify-sha256` / `--workers`。
+所有字段都可被 CLI flag 覆盖：`--download-root` / `--output-dir` / `--bbox 70,140,15,55` / `--verify-sha256` / `--workers` / `--output-format {netcdf,zarr}` / `--zarr-chunks step=-1,latitude=64,longitude=64`。
+
+### Zarr 输出
+
+切换到 zarr 后产物为目录 store：
+
+```
+<output_dir>/<source>/<date>_<cycle>z_<source>.zarr/
+```
+
+读取（`consolidated=True` 时一次拿全部元数据，开启快）：
+
+```python
+import xarray as xr
+
+ds = xr.open_zarr("output/ifs-hres/20260101_12z_ifs-hres.zarr", consolidated=True)
+
+# 取某省/电网区域的所有变量、整段预报时序 —— 只解 1-4 个 chunk，极快
+region = ds[["u100m", "v100m", "t2m", "ssrd"]].sel(
+    latitude=slice(35.0, 45.0),
+    longitude=slice(110.0, 120.0),
+).load()   # 一次 I/O 全部读入内存，后续循环/切片走纯 numpy，无再次 I/O
+
+# 之后训练循环直接 .values，无额外开销
+X = region["u100m"].values   # shape: (step, lat, lon)
+```
+
+默认 chunk 策略 `{step: -1, latitude: 64, longitude: 64, pressure_level: -1}` 偏向**区域时序**场景：16°×16° 以内的区域整段时序只命中 1 个 chunk（~800 KB），`.load()` 一次解压完毕。如果下游主要按时间窗口扫描全图（如气象大模型训练），把 `step` 改小（如 `12`）并把 `latitude/longitude` 设为 `-1` 更合适。`-1` 表示该维一整块；未出现在数据集中的维会被忽略，因此一份默认 chunks 可跨产品复用。
 
 ---
 
@@ -92,6 +124,8 @@ climate_restore list-sources
 | `--source-type NAME` | 强制使用某个 adapter（默认看 `manifest.source.name`） |
 | `--verify-sha256` | 启用 sha256 校验（默认只查 size） |
 | `--workers N` | 覆盖 YAML 的 `workers`（默认 `min(cpu_count, 4)`；`1` 关闭进程池）。85 文件实测：1→70s、4→23s、8→13s |
+| `--output-format {netcdf,zarr}` | 覆盖 YAML 的 `output_format`（默认 `netcdf`） |
+| `--zarr-chunks SPEC` | 覆盖 zarr chunks，格式 `dim=size,dim=size`，`-1` 表示整维一块 |
 | `--log-level LVL` | 日志级别（默认 INFO，JSON 行格式输出到 stderr；TTY 下会显示 tqdm 进度条） |
 
 ---

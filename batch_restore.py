@@ -16,20 +16,28 @@ from __future__ import annotations
 
 # --- 基底 Job YAML（可选，设为 None 则完全使用下方参数）------
 # 例：CONFIG_YAML = "config/jobs/ifs_china.yaml"
-CONFIG_YAML: str | None = "/Users/zmy/pycharm/climate_pipeline/climate_restorage/config/jobs/ifs_china.yaml"
+CONFIG_YAML: str | None = "/Users/zmy/pycharm/climate_pipeline/climate_restorage/config/jobs/ifs_zarr_china.yaml"
 
 # --- 气象源根目录（已下载数据的 download project root）--------
 # manifest 路径格式：<DOWNLOAD_ROOT>/output/<source>/<date>/<cycle>z/...manifest.json
 # 设为 None 则使用 YAML 中的 download_root
 DOWNLOAD_ROOT: str | None = "/Users/zmy/pycharm/climate_pipeline/climate_data/"
 
-# --- 输出目录（.nc 文件写入位置）------------------------------
+# --- 输出目录（.nc / .zarr 写入位置）--------------------------
 # 设为 None 则使用 YAML 中的 output_dir
-OUTPUT_DIR: str | None = "/Users/zmy/pycharm/climate_pipeline/climate_data_storage"
+OUTPUT_DIR: str | None = "/Users/zmy/pycharm/climate_pipeline/climate_data_storage/zarr"
+
+# --- 输出格式（None = 使用 YAML 中的 output_format，缺省 netcdf）
+# "netcdf" -> 单个 .nc 文件；"zarr" -> .zarr 目录 store
+OUTPUT_FORMAT: str | None = "zarr"
+
+# --- Zarr chunks 覆盖（None = 使用 YAML / 内置默认）-----------
+# 例：ZARR_CHUNKS = {"step": -1, "latitude": 64, "longitude": 64}
+ZARR_CHUNKS: dict[str, int] | None = None
 
 # --- 时间范围过滤（YYYYMMDD 字符串，包含两端）-----------------
-DATE_START: str = "20260315"   # 起始日期
-DATE_END:   str = "20260318"   # 截止日期（含）
+DATE_START: str = "20260201"   # 起始日期
+DATE_END:   str = "20260331"   # 截止日期（含）
 
 # --- 起报周期过滤（None = 不过滤；例如只取 [0, 12] UTC 起报）--
 # 例：CYCLES: list[int] | None = [0, 12]
@@ -85,8 +93,8 @@ def _parse_date(s: str) -> datetime:
     return datetime.strptime(s.strip(), "%Y%m%d")
 
 
-def _out_path_for(manifest, output_dir: Path) -> Path:
-    fname = f"{manifest.date}_{manifest.cycle:02d}z_{manifest.source_name}.nc"
+def _out_path_for(manifest, output_dir: Path, suffix: str) -> Path:
+    fname = f"{manifest.date}_{manifest.cycle:02d}z_{manifest.source_name}{suffix}"
     return (output_dir / manifest.source_name / fname).resolve()
 
 
@@ -112,6 +120,12 @@ def main() -> int:
     bbox          = BBOX if BBOX is not None else job.bbox
     workers       = WORKERS
     verify_sha256 = VERIFY_SHA256
+    output_format = OUTPUT_FORMAT or job.output_format
+    zarr_options  = job.zarr.model_copy(
+        update={"chunks": ZARR_CHUNKS}) if ZARR_CHUNKS is not None else job.zarr
+
+    from climate_restore.processor import format_suffix
+    out_suffix = format_suffix(output_format)
 
     date_start = _parse_date(DATE_START)
     date_end   = _parse_date(DATE_END)
@@ -121,7 +135,8 @@ def main() -> int:
              output_dir=str(output_dir),
              date_start=DATE_START, date_end=DATE_END,
              source_filter=SOURCE_FILTER, cycles=CYCLES,
-             workers=workers, skip_existing=SKIP_EXISTING)
+             workers=workers, skip_existing=SKIP_EXISTING,
+             output_format=output_format)
 
     # --- 发现 manifest ---
     from climate_restore.watcher import discover_manifests
@@ -167,7 +182,7 @@ def main() -> int:
     for mp in candidates:
         try:
             m = load_manifest(mp)
-            out_path = _out_path_for(m, output_dir)
+            out_path = _out_path_for(m, output_dir, out_suffix)
             if SKIP_EXISTING and out_path.exists():
                 log.info("skip_existing", out=str(out_path))
                 skipped += 1
@@ -191,7 +206,8 @@ def main() -> int:
                      date=m.date, cycle=m.cycle, files=len(grib_paths))
 
             process_init(grib_paths, adapter=adapter,
-                         bbox=bbox, out_path=out_path, workers=workers)
+                         bbox=bbox, out_path=out_path, workers=workers,
+                         output_format=output_format, zarr_options=zarr_options)
             log.info("done", out=str(out_path))
             ok += 1
 

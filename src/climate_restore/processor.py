@@ -19,6 +19,7 @@ varies between GFS / AIFS / HRRR / ... lives in the adapter.
 
 from __future__ import annotations
 
+import shutil
 import sys
 import warnings
 from collections import OrderedDict
@@ -36,11 +37,21 @@ import cfgrib  # noqa: E402
 import xarray as xr  # noqa: E402
 from tqdm import tqdm  # noqa: E402
 
-from .config import DEFAULT_WORKERS
+from .config import DEFAULT_WORKERS, OutputFormat, ZarrOptions
 from .logging_setup import get_logger
 from .sources.base import BaseAdapter
 
 DEFAULT_BBOX: tuple[float, float, float, float] = (70.0, 140.0, 15.0, 55.0)
+
+# Suffix per format; ``.zarr`` is a directory store, ``.nc`` a single file.
+_FORMAT_SUFFIX: dict[str, str] = {"netcdf": ".nc", "zarr": ".zarr"}
+
+
+def format_suffix(fmt: OutputFormat) -> str:
+    try:
+        return _FORMAT_SUFFIX[fmt]
+    except KeyError as e:
+        raise ValueError(f"unknown output_format: {fmt!r}") from e
 
 _log = get_logger(__name__)
 
@@ -88,6 +99,8 @@ def process_init(
     bbox: tuple[float, float, float, float],
     out_path: Path,
     workers: int = DEFAULT_WORKERS,
+    output_format: OutputFormat = "netcdf",
+    zarr_options: ZarrOptions | None = None,
 ) -> list[str]:
     """Process one (date, cycle): crop + time-concat all step files into ``out_path``.
 
@@ -96,7 +109,11 @@ def process_init(
     :class:`ProcessPoolExecutor` to parallelize cfgrib / eccodes which holds
     process-global state and is not thread-safe.
 
-    Returns the sorted list of data-variable names in the written NetCDF.
+    ``output_format`` picks the writer (``netcdf`` -> single ``.nc`` file,
+    ``zarr`` -> ``.zarr`` directory store); ``zarr_options`` is consulted
+    only when ``output_format == "zarr"``.
+
+    Returns the sorted list of data-variable names in the written output.
     """
     grib_paths = list(grib_paths)
     if not grib_paths:
@@ -152,10 +169,9 @@ def process_init(
     if "time" in final.coords and "step" in final.coords:
         final = final.assign_coords(valid_time=final["time"] + final["step"])
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if out_path.exists():
-        out_path.unlink()
-    final.to_netcdf(out_path, engine="netcdf4")
+    write_dataset(
+        final, out_path, fmt=output_format, zarr_options=zarr_options,
+    )
 
     variables = sorted(map(str, final.data_vars))
     _log.info(
@@ -164,5 +180,123 @@ def process_init(
         source=adapter.name,
         variables=len(variables),
         steps=int(final.sizes.get("step", 0)),
+        fmt=output_format,
     )
     return variables
+
+
+def _remove_output(out_path: Path) -> None:
+    """Drop a prior output if it exists.
+
+    Files are unlinked; ``.zarr`` directories are removed recursively. Any
+    other directory is refused to avoid wiping unrelated content.
+    """
+    if not out_path.exists():
+        return
+    if out_path.is_dir():
+        if out_path.suffix != ".zarr":
+            raise RuntimeError(
+                f"refusing to remove non-zarr directory: {out_path}"
+            )
+        shutil.rmtree(out_path)
+    else:
+        out_path.unlink()
+
+
+def _clear_chunk_encoding(ds: xr.Dataset) -> None:
+    """cfgrib copies NetCDF chunk hints into ``encoding`` which conflict
+    with the explicit per-variable ``chunks`` we set for ``to_zarr``."""
+    stale = ("chunks", "preferred_chunks", "contiguous", "original_shape")
+    for var in list(ds.variables):
+        enc = ds[var].encoding
+        for key in stale:
+            enc.pop(key, None)
+
+
+def _resolve_dim_chunks(
+    ds: xr.Dataset, chunks: dict[str, int]
+) -> dict[str, int]:
+    """Map a user-facing dim->chunk dict to concrete chunk sizes.
+
+    ``-1`` and ``0`` collapse to the full dim length; oversized requests are
+    clipped to the dim length; dims not present in ``ds`` are silently
+    dropped so a single default dict works across products.
+    """
+    resolved: dict[str, int] = {}
+    for dim, want in chunks.items():
+        if dim not in ds.dims:
+            continue
+        size = int(ds.sizes[dim])
+        if want is None or want <= 0:
+            resolved[dim] = size
+        else:
+            resolved[dim] = min(int(want), size)
+    return resolved
+
+
+def _build_zarr_encoding(
+    ds: xr.Dataset, opts: ZarrOptions
+) -> dict[str, dict]:
+    """Build a per-variable encoding dict for ``to_zarr`` (zarr v2 style).
+
+    Per-variable ``chunks`` are derived from the dim->size map in ``opts``
+    so callers don't need dask installed; dims absent from a variable fall
+    through to its full size.
+    """
+    dim_chunks = _resolve_dim_chunks(ds, opts.chunks)
+    if opts.compressor == "none":
+        compressor = None
+    else:
+        from numcodecs import Blosc
+
+        compressor = Blosc(
+            cname=opts.compressor, clevel=opts.clevel, shuffle=Blosc.SHUFFLE
+        )
+
+    encoding: dict[str, dict] = {}
+    for var in ds.data_vars:
+        da = ds[var]
+        chunk_shape = tuple(
+            dim_chunks.get(dim, int(da.sizes[dim])) for dim in da.dims
+        )
+        spec: dict = {"chunks": chunk_shape}
+        if compressor is not None:
+            spec["compressor"] = compressor
+        encoding[var] = spec
+    return encoding
+
+
+def write_dataset(
+    ds: xr.Dataset,
+    out_path: Path,
+    *,
+    fmt: OutputFormat = "netcdf",
+    zarr_options: ZarrOptions | None = None,
+) -> None:
+    """Persist ``ds`` as NetCDF4 or Zarr, replacing any prior output.
+
+    For Zarr the dataset is rechunked according to ``zarr_options.chunks``
+    (defaulting to ``ZarrOptions()``), compressed per ``zarr_options``, and
+    optionally consolidated for fast metadata reads.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _remove_output(out_path)
+
+    if fmt == "netcdf":
+        ds.to_netcdf(out_path, engine="netcdf4")
+        return
+
+    if fmt == "zarr":
+        opts = zarr_options or ZarrOptions()
+        _clear_chunk_encoding(ds)
+        encoding = _build_zarr_encoding(ds, opts)
+        ds.to_zarr(
+            out_path,
+            mode="w",
+            consolidated=opts.consolidated,
+            zarr_format=opts.zarr_format,
+            encoding=encoding,
+        )
+        return
+
+    raise ValueError(f"unknown output_format: {fmt!r}")

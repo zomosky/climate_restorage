@@ -38,6 +38,7 @@ __all__ = ["GraphCastAdapter"]
 
 
 @register("graphcast")
+@register("graphcast-history")
 @register("graphcast-pres")
 @register("graphcast-sfc")
 class GraphCastAdapter(BaseAdapter):

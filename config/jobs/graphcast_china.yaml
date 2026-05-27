@@ -1,0 +1,29 @@
+# climate_restore job: crop GraphCast-history GRIB subsets to the China region
+# and time-concatenate one (date, cycle) into a single NetCDF file.
+#
+# Usage:
+#   uv run climate_restore run \
+#       --config config/jobs/graphcast_china.yaml \
+#       --manifest /path/to/graphcast-history/20260101/12z/20260101_12z_graphcast-history.manifest.json
+
+#download_root: ../download
+#output_dir: output
+
+download_root: /Users/zmy/pycharm/climate_pipeline/climate_data
+output_dir: /Users/zmy/pycharm/climate_pipeline/climate_data_storage
+bbox: [70.0, 140.0, 15.0, 55.0]  # west, east, south, north (China region)
+verify_sha256: false
+# workers: 4  # parallel GRIB decode processes; 1 to disable pool
+workers: 10
+
+output_format: zarr
+zarr: 
+  chunks: {step: -1, latitude: 64, longitude: 64, pressure_level: -1}
+  compressor: zstd
+  clevel: 3
+  consolidated: true   # xr.open_zarr 启动时只读一次 .zmetadata
+  zarr_format: 2
+
+
+
+

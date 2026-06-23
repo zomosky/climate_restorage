@@ -16,8 +16,8 @@ from __future__ import annotations
 
 # --- 基底 Job YAML（可选，设为 None 则完全使用下方参数）------
 # 例：CONFIG_YAML = "config/jobs/ifs_china.yaml"
-# CONFIG_YAML: str | None = "/Users/zmy/pycharm/climate_pipeline/climate_restorage/config/jobs/graphcast_china.yaml"
-CONFIG_YAML: str | None = "/Users/zmy/pycharm/climate_pipeline/climate_restorage/config/jobs/aifs_zarr_china.yaml"
+# CONFIG_YAML: str | None = "/Users/zmy/pycharm/climate_pipeline/climate_restorage/config/jobs/ifs_zarr_china.yaml"
+CONFIG_YAML: str | None = "/Users/zmy/pycharm/climate_pipeline/climate_restorage/config/jobs/gfs_china.yaml"
 
 # --- 气象源根目录（已下载数据的 download project root）--------
 # manifest 路径格式：<DOWNLOAD_ROOT>/output/<source>/<date>/<cycle>z/...manifest.json
@@ -37,8 +37,8 @@ OUTPUT_FORMAT: str | None = "zarr"
 ZARR_CHUNKS: dict[str, int] | None = None
 
 # --- 时间范围过滤（YYYYMMDD 字符串，包含两端）-----------------
-DATE_START: str = "20260301"   # 起始日期
-DATE_END:   str = "20260501"   # 截止日期（含）
+DATE_START: str = "20260201"   # 起始日期
+DATE_END:   str = "20260206"   # 截止日期（含）
 
 # --- 起报周期过滤（None = 不过滤；例如只取 [0, 12] UTC 起报）--
 # 例：CYCLES: list[int] | None = [0, 12]
@@ -47,7 +47,7 @@ CYCLES: list[int] | None = None
 # --- 数据源名称过滤（None = 不过滤；例如只处理某一源）----------
 # 例：SOURCE_FILTER: str | None = "gfs-0p25"
 # SOURCE_FILTER: str | None = "graphcast-history"
-SOURCE_FILTER: str | None = "aifs-single"
+SOURCE_FILTER: str | None = "gfs-0p25"
 
 # --- 强制使用某个 adapter（None = 自动从 manifest.source.name 推断）
 SOURCE_TYPE_OVERRIDE: str | None = None

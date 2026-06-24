@@ -110,10 +110,41 @@ X = region["u100m"].values   # shape: (step, lat, lon)
 ```
 climate_restore run         --manifest PATH [common]
 climate_restore watch       [--source NAME] [--interval SEC] [common]
+climate_restore scan-once   [--source NAME] [--force] [common]
 climate_restore list-sources
 ```
 
-公共 flag（`common`）：
+三种驱动方式的区别：
+
+| 子命令 | 形态 | 幂等性来源 | 适用 |
+|---|---|---|---|
+| `run` | 处理单个 manifest，退出 | 无（每次都重处理） | 手动补一个起报 |
+| `watch` | 常驻轮询，永不退出 | **内存** `seen` 集合 | 前台调试、单机长驻 |
+| `scan-once` | 扫一遍全部 manifest，处理未完成的，退出 | **磁盘产物**（输出已完整就跳过） | **cron 定时调度** |
+
+> `watch` 的 `seen` 在重启时会被"当前已存在的全部 manifest"重新播种，因此**进程宕机期间新增的 manifest 会被永久跳过**。`scan-once` 把幂等性建立在磁盘上的 `.zarr`/`.nc` 产物上：只要输出还不存在或不完整就会处理，所以可以由 cron 任意频率反复拉起，宕机不丢任务。判定"已完整"用的是**写到最后**的标记——consolidated zarr 看 `.zmetadata`、netcdf 看非空文件——所以半途崩溃留下的残缺 store 会被重新处理而非误跳过。
+
+`scan-once` 专属 flag：
+
+| flag | 含义 |
+|---|---|
+| `--source NAME` | 只扫某个源子树（如 `gfs-0p25`） |
+| `--force` | 即使产物已存在也重新处理（改了规则/想重建时用） |
+
+退出码：全部成功或跳过 `0`；只要有一个**已就绪**的 manifest 处理失败就返回 `1`（供调度器告警）。下载未完成（无 `completed_at` 或带 `failures`）的 manifest 计入 `not_ready`，留待下次扫描，不算失败。
+
+### cron 定时处理（推荐用 `scan-once`）
+
+```cron
+# 每 10 分钟扫一次 download 输出，把新下载好的起报处理成 zarr。
+# flock 防止上一轮没跑完时重叠启动（scan-once 本身幂等，flock 只是省资源）。
+*/10 * * * * /usr/bin/flock -n /tmp/climate_restore.lock \
+    sh -c 'cd /path/to/climate_restorage && uv run climate_restore scan-once \
+        --config config/jobs/gfs_china.yaml --output-format zarr \
+        >> logs/scan.log 2>&1'
+```
+
+公共 flag（`common`，三个处理子命令通用）：
 
 | flag | 含义 |
 |---|---|

@@ -1,4 +1,5 @@
-"""``climate_restore`` CLI entrypoint: ``run`` (single manifest) + ``watch`` (poll)."""
+"""``climate_restore`` CLI entrypoint: ``run`` (single manifest) + ``watch`` (poll) +
+``scan-once`` (idempotent one-shot sweep, for cron)."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ from pathlib import Path
 from .config import (
     JobConfig,
     OutputFormat,
+    ZarrOptions,
     load_job,
     parse_bbox_str,
     parse_chunks_str,
@@ -23,7 +25,7 @@ from .processor import (
 )
 from .sources import get_source, list_sources
 from .sources.base import BaseAdapter
-from .watcher import watch_manifests
+from .watcher import discover_manifests, watch_manifests
 
 _log = get_logger(__name__)
 
@@ -172,6 +174,107 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _output_complete(out_path: Path, fmt: OutputFormat, zarr_options: ZarrOptions) -> bool:
+    """Has ``out_path`` already been fully written?
+
+    The processor writes in place (``_remove_output`` + ``to_zarr``/``to_netcdf``),
+    so a crash mid-write can leave a *partial* store. We therefore key off a
+    "done last" marker rather than mere existence:
+
+    - zarr + ``consolidated`` (the job default): ``.zmetadata`` is written last
+      by xarray's consolidation pass, so its presence means the store is whole.
+    - zarr without consolidation: best-effort — the root group marker exists.
+    - netcdf: a single ``to_netcdf`` call, so a non-empty file is good enough.
+    """
+    if format_suffix(fmt) == ".zarr":
+        if not out_path.is_dir():
+            return False
+        if getattr(zarr_options, "consolidated", True):
+            return (out_path / ".zmetadata").is_file()
+        return (out_path / ".zgroup").is_file() or (out_path / "zarr.json").is_file()
+    return out_path.is_file() and out_path.stat().st_size > 0
+
+
+def cmd_scan(args: argparse.Namespace) -> int:
+    """One-shot, idempotent sweep over every manifest under the download root.
+
+    Unlike ``watch`` (a long-running poll whose "already seen" set lives only in
+    memory and is re-seeded from disk on restart — so manifests that appear while
+    it is down are skipped forever), ``scan-once`` keys idempotency off the
+    on-disk output: any init whose ``.zarr``/``.nc`` is already complete is
+    skipped, everything else is processed, then the process exits. That makes it
+    safe to drive from cron at any interval. Manifests whose download has not
+    finished (no ``completed_at`` or recorded ``failures``) are left for a later
+    sweep. Exit code is non-zero iff at least one ready manifest failed to
+    process, so a scheduler can alert on it.
+    """
+    job = _load_job(args)
+    download_root = (Path(args.download_root) if args.download_root else job.download_root).resolve()
+    output_dir = (Path(args.output_dir) if args.output_dir else job.output_dir).resolve()
+    output_format = args.output_format or job.output_format
+    manifests = discover_manifests(download_root, source=args.source)
+    _log.info(
+        "scan_start",
+        download_root=str(download_root),
+        source=args.source,
+        manifests=len(manifests),
+        output_format=output_format,
+        force=args.force,
+    )
+
+    processed = skipped = not_ready = failed = 0
+    for manifest_path in manifests:
+        try:
+            manifest = load_manifest(manifest_path)
+        except Exception as exc:
+            _log.error("scan_manifest_load_failed", manifest=str(manifest_path), error=str(exc))
+            failed += 1
+            continue
+
+        if manifest.completed_at is None or manifest.failures:
+            _log.info(
+                "scan_not_ready",
+                manifest=str(manifest_path),
+                completed_at=manifest.completed_at,
+                failures=len(manifest.failures),
+            )
+            not_ready += 1
+            continue
+
+        out_path = _out_path(output_dir, manifest, output_format)
+        if not args.force and _output_complete(out_path, output_format, job.zarr):
+            _log.info("scan_skip_done", manifest=str(manifest_path), out_path=str(out_path))
+            skipped += 1
+            continue
+
+        try:
+            _process_one(
+                manifest_path,
+                job=job,
+                cli_download_root=download_root,
+                cli_output_dir=output_dir,
+                cli_bbox=_cli_bbox(args),
+                cli_source_type=args.source_type,
+                verify_sha256=args.verify_sha256,
+                cli_workers=args.workers,
+                cli_output_format=args.output_format,
+                cli_zarr_chunks=_cli_zarr_chunks(args),
+            )
+            processed += 1
+        except Exception as exc:
+            _log.error("scan_process_failed", manifest=str(manifest_path), error=str(exc))
+            failed += 1
+
+    _log.info(
+        "scan_done",
+        processed=processed,
+        skipped=skipped,
+        not_ready=not_ready,
+        failed=failed,
+    )
+    return 1 if failed else 0
+
+
 def cmd_list_sources(args: argparse.Namespace) -> int:
     for name in list_sources():
         print(name)
@@ -213,6 +316,16 @@ def main(argv: list[str] | None = None) -> int:
                          help="polling interval in seconds (default 30)")
     _add_common(p_watch)
     p_watch.set_defaults(func=cmd_watch)
+
+    p_scan = sub.add_parser(
+        "scan-once",
+        help="process every not-yet-processed manifest once, then exit (idempotent; for cron)",
+    )
+    p_scan.add_argument("--source", help="restrict to one source subtree, e.g. gfs-0p25")
+    p_scan.add_argument("--force", action="store_true",
+                        help="reprocess even if the output already exists")
+    _add_common(p_scan)
+    p_scan.set_defaults(func=cmd_scan)
 
     p_ls = sub.add_parser("list-sources", help="list registered source adapters")
     p_ls.add_argument("--log-level", default="INFO")

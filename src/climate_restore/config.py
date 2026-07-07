@@ -64,7 +64,6 @@ class JobConfig(BaseModel):
         to ``../download`` relative to the restorage project.
     output_dir: where to write produced output files.
     bbox: spatial crop window as (west, east, south, north) in degrees.
-    verify_sha256: if true, also verify sha256 (slow) on top of size check.
     workers: parallel decode workers; ``1`` disables the process pool.
     output_format: ``"netcdf"`` (default, ``.nc``) or ``"zarr"`` (``.zarr`` dir).
     zarr: writer options used when ``output_format == "zarr"``.
@@ -75,7 +74,6 @@ class JobConfig(BaseModel):
     download_root: Path = Field(default=Path("../download"))
     output_dir: Path = Field(default=Path("output"))
     bbox: BBoxTuple = (70.0, 140.0, 15.0, 55.0)
-    verify_sha256: bool = False
     workers: int = Field(default=DEFAULT_WORKERS, ge=1)
     output_format: OutputFormat = DEFAULT_OUTPUT_FORMAT
     zarr: ZarrOptions = Field(default_factory=ZarrOptions)

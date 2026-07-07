@@ -9,5 +9,4 @@
 download_root: ../download
 output_dir: output
 bbox: [70.0, 140.0, 15.0, 55.0]  # west, east, south, north (China region)
-verify_sha256: false
 workers: 4  # parallel GRIB decode processes; 1 to disable pool

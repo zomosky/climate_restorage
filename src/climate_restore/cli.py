@@ -64,7 +64,6 @@ def _process_one(
     cli_output_dir: Path | None,
     cli_bbox: tuple[float, float, float, float] | None,
     cli_source_type: str | None,
-    verify_sha256: bool,
     cli_workers: int | None,
     cli_output_format: OutputFormat | None,
     cli_zarr_chunks: dict[str, int] | None,
@@ -88,9 +87,8 @@ def _process_one(
         date=manifest.date,
         cycle=manifest.cycle,
         files=len(manifest.files),
-        check_sha256=verify_sha256,
     )
-    grib_paths = verify(manifest, download_root, check_sha256=verify_sha256)
+    grib_paths = verify(manifest, download_root)
     _log.info("verify_ok", files=len(grib_paths))
 
     out_path = _out_path(output_dir, manifest, output_format)
@@ -135,7 +133,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         cli_output_dir=Path(args.output_dir) if args.output_dir else None,
         cli_bbox=_cli_bbox(args),
         cli_source_type=args.source_type,
-        verify_sha256=args.verify_sha256,
         cli_workers=args.workers,
         cli_output_format=args.output_format,
         cli_zarr_chunks=_cli_zarr_chunks(args),
@@ -164,7 +161,6 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 cli_output_dir=Path(args.output_dir) if args.output_dir else None,
                 cli_bbox=_cli_bbox(args),
                 cli_source_type=args.source_type,
-                verify_sha256=args.verify_sha256,
                 cli_workers=args.workers,
                 cli_output_format=args.output_format,
                 cli_zarr_chunks=_cli_zarr_chunks(args),
@@ -255,7 +251,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 cli_output_dir=output_dir,
                 cli_bbox=_cli_bbox(args),
                 cli_source_type=args.source_type,
-                verify_sha256=args.verify_sha256,
                 cli_workers=args.workers,
                 cli_output_format=args.output_format,
                 cli_zarr_chunks=_cli_zarr_chunks(args),
@@ -288,8 +283,6 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--bbox", help="west,east,south,north (degrees), overrides job/default")
     p.add_argument("--source-type",
                    help="override the source adapter (default: manifest source.name)")
-    p.add_argument("--verify-sha256", action="store_true",
-                   help="also verify sha256 (slower) in addition to size check")
     p.add_argument("--workers", type=int, default=None,
                    help=f"parallel decode workers; overrides job YAML "
                         f"(YAML default {DEFAULT_WORKERS}; set 1 to disable the pool)")

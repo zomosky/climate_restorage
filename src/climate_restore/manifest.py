@@ -110,8 +110,6 @@ def resolve_file(manifest: Manifest, download_root: Path, entry: ManifestFile) -
 def verify(
     manifest: Manifest,
     download_root: Path,
-    *,
-    check_sha256: bool = False,  # accepted for backward compat; ignored
 ) -> list[Path]:
     """Resolve and return the manifest's step files in step order.
 
@@ -125,7 +123,6 @@ def verify(
     readability is left to the cropping step which opens each GRIB via
     cfgrib; any unreadable file naturally fails there with a clear error.
     """
-    del check_sha256  # no longer used
     if manifest.completed_at is None:
         raise ValueError(
             f"manifest {manifest.manifest_path} has no completed_at; download not finished"

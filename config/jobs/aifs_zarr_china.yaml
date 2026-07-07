@@ -11,7 +11,6 @@
 download_root: /Users/zmy/pycharm/climate_pipeline/climate_data
 output_dir: /Users/zmy/pycharm/climate_pipeline/climate_data_storage/zarr
 bbox: [70.0, 140.0, 15.0, 55.0]  # west, east, south, north（中国区）
-verify_sha256: false
 workers: 10
 
 output_format: zarr

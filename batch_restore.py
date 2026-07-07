@@ -16,8 +16,8 @@ from __future__ import annotations
 
 # --- 基底 Job YAML（可选，设为 None 则完全使用下方参数）------
 # 例：CONFIG_YAML = "config/jobs/ifs_china.yaml"
-# CONFIG_YAML: str | None = "/Users/zmy/pycharm/climate_pipeline/climate_restorage/config/jobs/ifs_zarr_china.yaml"
-CONFIG_YAML: str | None = "/Users/zmy/pycharm/climate_pipeline/climate_restorage/config/jobs/gfs_china.yaml"
+CONFIG_YAML: str | None = "/Users/zmy/pycharm/climate_pipeline/climate_restorage/config/jobs/ifs_zarr_china.yaml"
+# CONFIG_YAML: str | None = "/Users/zmy/pycharm/climate_pipeline/climate_restorage/config/jobs/gfs_china.yaml"
 
 # --- 气象源根目录（已下载数据的 download project root）--------
 # manifest 路径格式：<DOWNLOAD_ROOT>/output/<source>/<date>/<cycle>z/...manifest.json
@@ -37,8 +37,8 @@ OUTPUT_FORMAT: str | None = "zarr"
 ZARR_CHUNKS: dict[str, int] | None = None
 
 # --- 时间范围过滤（YYYYMMDD 字符串，包含两端）-----------------
-DATE_START: str = "20260201"   # 起始日期
-DATE_END:   str = "20260206"   # 截止日期（含）
+DATE_START: str = "20251001"   # 起始日期
+DATE_END:   str = "20260101"   # 截止日期（含）
 
 # --- 起报周期过滤（None = 不过滤；例如只取 [0, 12] UTC 起报）--
 # 例：CYCLES: list[int] | None = [0, 12]
@@ -46,17 +46,14 @@ CYCLES: list[int] | None = None
 
 # --- 数据源名称过滤（None = 不过滤；例如只处理某一源）----------
 # 例：SOURCE_FILTER: str | None = "gfs-0p25"
-# SOURCE_FILTER: str | None = "graphcast-history"
-SOURCE_FILTER: str | None = "gfs-0p25"
+SOURCE_FILTER: str | None = "ifs-hres"
+# SOURCE_FILTER: str | None = "gfs-0p25"
 
 # --- 强制使用某个 adapter（None = 自动从 manifest.source.name 推断）
 SOURCE_TYPE_OVERRIDE: str | None = None
 
 # --- 并行解码进程数（覆盖 YAML；1 = 关闭进程池，方便调试）------
 WORKERS: int = 10
-
-# --- 是否同时验证 SHA-256（慢，默认只验 size）------------------
-VERIFY_SHA256: bool = False
 
 # --- 裁剪框 (west, east, south, north)，None = 使用 YAML / 内置默认
 BBOX: tuple[float, float, float, float] | None = None  # e.g. (70.0, 140.0, 15.0, 55.0)
@@ -121,7 +118,6 @@ def main() -> int:
     output_dir    = Path(OUTPUT_DIR).resolve()    if OUTPUT_DIR    else job.output_dir.resolve()
     bbox          = BBOX if BBOX is not None else job.bbox
     workers       = WORKERS
-    verify_sha256 = VERIFY_SHA256
     output_format = OUTPUT_FORMAT or job.output_format
     zarr_options  = job.zarr.model_copy(
         update={"chunks": ZARR_CHUNKS}) if ZARR_CHUNKS is not None else job.zarr
@@ -195,7 +191,7 @@ def main() -> int:
             adapter = adapter_cls(name=source_key)
 
             try:
-                grib_paths = verify(m, download_root, check_sha256=verify_sha256)
+                grib_paths = verify(m, download_root)
             except ManifestHasFailures as exc:
                 log.warning("skip_manifest_failures", manifest=str(mp),
                             date=m.date, cycle=m.cycle,

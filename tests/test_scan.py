@@ -70,7 +70,6 @@ def _scan_args(download_root: Path, output_dir: Path, **over) -> argparse.Namesp
         force=False,
         bbox=None,
         source_type=None,
-        verify_sha256=False,
         workers=None,
         zarr_chunks=None,
     )

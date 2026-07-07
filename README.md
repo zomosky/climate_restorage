@@ -63,7 +63,6 @@ ds.valid_time.values                                                 # 每个 st
 download_root: ../download                 # download 项目根；manifest 路径可自动反推
 output_dir: output                         # 输出根目录（.nc 或 .zarr 落于其下）
 bbox: [70.0, 140.0, 15.0, 55.0]            # west, east, south, north
-verify_sha256: false                       # true 时全文件哈希校验（慢）
 workers: 4                                 # 并行解码 GRIB 的进程数；1 关闭进程池
 output_format: netcdf                      # netcdf (默认, .nc) | zarr (.zarr 目录)
 zarr:                                      # 仅 output_format=zarr 时生效
@@ -74,7 +73,7 @@ zarr:                                      # 仅 output_format=zarr 时生效
   zarr_format: 2
 ```
 
-所有字段都可被 CLI flag 覆盖：`--download-root` / `--output-dir` / `--bbox 70,140,15,55` / `--verify-sha256` / `--workers` / `--output-format {netcdf,zarr}` / `--zarr-chunks step=-1,latitude=64,longitude=64`。
+所有字段都可被 CLI flag 覆盖：`--download-root` / `--output-dir` / `--bbox 70,140,15,55` / `--workers` / `--output-format {netcdf,zarr}` / `--zarr-chunks step=-1,latitude=64,longitude=64`。
 
 ### Zarr 输出
 
@@ -153,7 +152,6 @@ climate_restore list-sources
 | `--output-dir DIR` | 覆盖输出目录 |
 | `--bbox W,E,S,N` | 覆盖裁剪框 |
 | `--source-type NAME` | 强制使用某个 adapter（默认看 `manifest.source.name`） |
-| `--verify-sha256` | 启用 sha256 校验（默认只查 size） |
 | `--workers N` | 覆盖 YAML 的 `workers`（默认 `min(cpu_count, 4)`；`1` 关闭进程池）。85 文件实测：1→70s、4→23s、8→13s |
 | `--output-format {netcdf,zarr}` | 覆盖 YAML 的 `output_format`（默认 `netcdf`） |
 | `--zarr-chunks SPEC` | 覆盖 zarr chunks，格式 `dim=size,dim=size`，`-1` 表示整维一块 |
@@ -198,7 +196,7 @@ restorage 只看 manifest，因此实际行为：
 | 部分 step 失败（49 个挂 2 个） | 写入，但 `files[]` 只含成功的 47 个，**无 incomplete 标记** | 照常处理 47 个 step；输出的 `step` 维稀疏 ⚠️ |
 | 上游还没发够 step（`init_steps_missing`） | 同上 | 同上 ⚠️ |
 | manifest 自己写失败 | 无 manifest | 不处理 ✅ |
-| 落盘后磁盘损坏 | size 不匹配 | `manifest.verify()` size 校验拦截；`--verify-sha256` 加哈希一层 ✅ |
+| 落盘后磁盘损坏 | 文件在但内容损坏 | `verify()` 只确认文件存在（不再校验 size/sha256）；损坏在 cfgrib 解码该 GRIB 时报错暴露 ⚠️ |
 
 **推荐做法**：消费产物时先检查 `len(ds.step)` 和 `ds.valid_time` 是否连续，缺帧时回查 `_runs/` 下相近时间的 run report 看是否有 `failures[]`。等真出现过一次因部分失败导致下游困惑，再考虑在 download manifest 里加 `expected_steps` / `missing_steps` 字段。
 

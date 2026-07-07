@@ -13,7 +13,7 @@ Python ≥ 3.11，依赖管理使用 [uv](https://docs.astral.sh/uv/)。
 ```bash
 uv sync           # 运行依赖
 uv sync --dev     # 同时安装 pytest
-uv run pytest     # 跑测试 (22 个)
+uv run pytest     # 跑测试 (30 个；含 3 个在缺 GRIB fixture 时自动 skip)
 ```
 
 ---
@@ -23,16 +23,16 @@ uv run pytest     # 跑测试 (22 个)
 ```bash
 # 1. 看注册了哪些源 adapter
 uv run climate_restore list-sources
-# aifs-single / gfs-0p25 / graphcast / graphcast-pres / graphcast-sfc / ifs-hres
+# aifs-single / gfs-0p25 / graphcast / graphcast-history / graphcast-pres / graphcast-sfc / ifs-hres
 
 # 2. 处理一个已下载完成的 manifest
 uv run climate_restore run \
-    --config config/jobs/gfs_china.yaml \
+    --config config/jobs/gfs_zarr_china.yaml \
     --manifest ../download/output/gfs-0p25/20260501/12z/20260501_12z_gfs-0p25.manifest.json
 
 # 3. 长驻：轮询 download 输出，发现新 manifest 就处理
 uv run climate_restore watch \
-    --config config/jobs/gfs_china.yaml \
+    --config config/jobs/gfs_zarr_china.yaml \
     --source gfs-0p25 --interval 30
 ```
 
@@ -57,14 +57,14 @@ ds.valid_time.values                                                 # 每个 st
 
 ## 3. 作业配置（YAML）
 
-`config/jobs/gfs_china.yaml`：
+`config/jobs/gfs_zarr_china.yaml`（`config/jobs/` 下现有 `gfs_zarr_china` / `ifs_zarr_china` / `aifs_zarr_china` / `graphcast_china` 四份，均输出 zarr）：
 
 ```yaml
 download_root: ../download                 # download 项目根；manifest 路径可自动反推
 output_dir: output                         # 输出根目录（.nc 或 .zarr 落于其下）
 bbox: [70.0, 140.0, 15.0, 55.0]            # west, east, south, north
-workers: 4                                 # 并行解码 GRIB 的进程数；1 关闭进程池
-output_format: netcdf                      # netcdf (默认, .nc) | zarr (.zarr 目录)
+workers: 4                                 # 并行解码 GRIB 的进程数；1 关闭进程池（默认 min(cpu,4)）
+output_format: zarr                        # netcdf (代码默认, .nc) | zarr (.zarr 目录)
 zarr:                                      # 仅 output_format=zarr 时生效
   chunks: {step: -1, latitude: 64, longitude: 64, pressure_level: -1}
   compressor: zstd                         # zstd | lz4 | blosclz | zlib | none
@@ -139,7 +139,7 @@ climate_restore list-sources
 # flock 防止上一轮没跑完时重叠启动（scan-once 本身幂等，flock 只是省资源）。
 */10 * * * * /usr/bin/flock -n /tmp/climate_restore.lock \
     sh -c 'cd /path/to/climate_restorage && uv run climate_restore scan-once \
-        --config config/jobs/gfs_china.yaml --output-format zarr \
+        --config config/jobs/gfs_zarr_china.yaml --output-format zarr \
         >> logs/scan.log 2>&1'
 ```
 
@@ -164,10 +164,10 @@ climate_restore list-sources
 | 注册名 | adapter | 说明 |
 |---|---|---|
 | `gfs-0p25` | `GfsAdapter` | NOAA GFS 0.25° atmos forecast (wgrib2 idx) |
-| `graphcast-sfc` / `graphcast-pres` / `graphcast` | `GraphCastAdapter` | NOAA NWS GraphCastGFS (aigfs)，sfc + pres 两份独立 manifest |
+| `graphcast-sfc` / `graphcast-pres` / `graphcast` / `graphcast-history` | `GraphCastAdapter` | NOAA NWS GraphCastGFS (aigfs)，sfc + pres 两份独立 manifest |
 | `aifs-single` / `ifs-hres` | `AifsAdapter` | ECMWF AIFS / IFS HRES (open-data) |
 
-GraphCast 每次起报会落两份 manifest（`-sfc` / `-pres`），各自处理成各自的 `.nc`；下游若要"一次起报的完整状态"，可对同一 (date, cycle) 的两个文件 `xr.open_mfdataset` 合并。`-pres` 内部不同变量覆盖的压力层不一致（`t/u/v/gh` 在 [1000, 850, 500]，`q` 仅 [1000, 850]，`w` 在 [925, 850, 700, 500]），合并后 `pressure_level` 取并集 `[500, 700, 850, 925, 1000]`，未覆盖位置为 NaN。
+GraphCast 每次起报会落两份 manifest（`-sfc` / `-pres`），各自处理成各自的 `.nc` / `.zarr`；下游若要"一次起报的完整状态"，可对同一 (date, cycle) 的两个文件 `xr.open_mfdataset` 合并。`-pres` 内部不同变量覆盖的压力层不一致（`t/u/v/gh` 在 [1000, 850, 500]，`q` 仅 [1000, 850]，`w` 在 [925, 850, 700, 500]），合并后 `pressure_level` 取并集 `[500, 700, 850, 925, 1000]`，未覆盖位置为 NaN。
 
 变量命名约定（重命名后）：
 
@@ -176,6 +176,7 @@ GraphCast 每次起报会落两份 manifest（`-sfc` / `-pres`），各自处理
 - 压力层变量保留原名并携带 `pressure_level` 维度（`t` / `u` / `v` / `gh` / `z` / `q` / `w` …）
 - 非 instant 量加 stepType 后缀：`prate` → `prate_avg`，`tp` (accum) → `tp_accum`，cfgrib 的 `avg_hcc` → `hcc_avg`
 - 地面瞬时 `t` 在 GFS 下改名为 `t_sfc`，避免与压力层 `t` 冲突
+- 云量分层：高/中/低云 → `hcc` / `mcc` / `lcc`（各自 `_avg` 变体）。GFS 的总云量 `tcc` 实际同时出现在 **3 个 typeOfLevel**——`atmosphere`（整层，保留为 `tcc` / `tcc_avg`）、`convectiveCloudLayer`（对流云，重命名为 `tcc_conv`）、`boundaryLayerCloudLayer`（边界层云，`avg` → `tcc_bl_avg`）。三者 cfgrib shortName 都是 `tcc`，若不改名会在按 step 拼接时**塌缩成同一个 `tcc` 并互相静默覆盖**，因此后两层各起独立名字
 
 ---
 
@@ -236,6 +237,7 @@ uv run pytest -q
 
 包含：
 
-- `tests/test_rules.py` — 五个 Rule 类的单元测试（in-memory `xr.Dataset`，不依赖 GRIB）
+- `tests/test_rules.py` — 五个 Rule 类的单元测试（in-memory `xr.Dataset`，不依赖 GRIB），含 `StepTypeSuffixRule` 的 `renames`（防 `tcc` 多层塌缩）回归用例
 - `tests/test_registry.py` — 注册 / 查找 / 重名抛错 / 排序
-- `tests/test_gfs_golden.py` — 对 `../download/output/.../f001.subset.grib2` 跑 GFS adapter，断言产出的变量名集合（fixture 缺失时自动 skip）z
+- `tests/test_scan.py` — `scan-once` 幂等性 / 就绪判定
+- `tests/test_gfs_golden.py` — 对 `../download/output/.../f001.subset.grib2` 跑 GFS adapter，断言产出的变量名集合（fixture 缺失时自动 skip）

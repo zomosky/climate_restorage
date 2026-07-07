@@ -47,6 +47,9 @@ EXPECTED_VARIABLES: set[str] = {
     "mcc", "mcc_avg",
     "lcc", "lcc_avg",
     "tcc", "tcc_avg",
+    # Convective / boundary-layer cloud cover share cfgrib's ``tcc`` shortName;
+    # renamed so they don't collapse into the atmosphere-total tcc.
+    "tcc_conv", "tcc_bl_avg",
 }
 
 

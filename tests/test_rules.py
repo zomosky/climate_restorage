@@ -123,6 +123,24 @@ class TestStepTypeSuffixRule:
         ds = out[0]
         assert set(ds.data_vars) == {"t_sfc", "sp"}
 
+    def test_renames_apply_to_instant(self, tcc_conv_instant):
+        # GFS ``convectiveCloudLayer`` tcc must not collide with the
+        # atmosphere-total ``tcc``; ``renames`` gives it a distinct base name.
+        out = StepTypeSuffixRule(renames={"tcc": "tcc_conv"}).apply(
+            tcc_conv_instant, type_of_level="convectiveCloudLayer",
+            step_type="instant",
+        )
+        assert set(out[0].data_vars) == {"tcc_conv"}
+
+    def test_renames_precede_steptype_suffix(self, tcc_bl_avg):
+        # ``boundaryLayerCloudLayer`` tcc is *avg*: renaming the base first and
+        # then appending the stepType yields ``tcc_bl_avg`` — distinct from the
+        # atmosphere avg ``tcc_avg`` it would otherwise collide with.
+        out = StepTypeSuffixRule(renames={"tcc": "tcc_bl"}).apply(
+            tcc_bl_avg, type_of_level="boundaryLayerCloudLayer", step_type="avg"
+        )
+        assert set(out[0].data_vars) == {"tcc_bl_avg"}
+
 
 class TestPrefixToSuffixRule:
     def test_avg_prefix_rewritten(self, cloud_layer_mixed):

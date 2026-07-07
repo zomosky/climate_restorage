@@ -106,6 +106,28 @@ def surface_avg():
 
 
 @pytest.fixture
+def tcc_conv_instant():
+    """convectiveCloudLayer ``tcc`` (instant) — same shortName as atmosphere tcc."""
+    g = _grid()
+    data = np.zeros((2, 3))
+    return xr.Dataset(
+        {"tcc": (("latitude", "longitude"), data, _attrs("convectiveCloudLayer", "instant"))},
+        coords={**g, "convectiveCloudLayer": 0.0},
+    )
+
+
+@pytest.fixture
+def tcc_bl_avg():
+    """boundaryLayerCloudLayer ``tcc`` (avg) — same shortName as atmosphere tcc."""
+    g = _grid()
+    data = np.zeros((2, 3))
+    return xr.Dataset(
+        {"tcc": (("latitude", "longitude"), data, _attrs("boundaryLayerCloudLayer", "avg"))},
+        coords={**g, "boundaryLayerCloudLayer": 0.0},
+    )
+
+
+@pytest.fixture
 def cloud_layer_mixed():
     """A cloud-layer hypercube that bundles ``hcc`` and ``avg_hcc``."""
     g = _grid()

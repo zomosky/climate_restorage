@@ -39,6 +39,12 @@ class GfsAdapter(BaseAdapter):
       stepType suffix (``prate`` avg → ``prate_avg``).
     - Cloud layers: cfgrib's ``avg_hcc`` becomes ``hcc_avg``; same for
       mcc/lcc. Atmosphere ``tcc`` avg variant becomes ``tcc_avg``.
+    - GFS also ships ``tcc`` at ``convectiveCloudLayer`` (instant) and
+      ``boundaryLayerCloudLayer`` (avg). These carry the same cfgrib shortName
+      as the atmosphere total cloud cover, so they are renamed to ``tcc_conv``
+      and ``tcc_bl`` (→ ``tcc_bl_avg``) to keep ``tcc``/``tcc_avg`` meaning the
+      atmosphere-column total. Without these rules all three collapse into one
+      ``tcc`` variable and steps silently overwrite each other.
     """
 
     name: ClassVar[str] = "gfs"
@@ -54,4 +60,6 @@ class GfsAdapter(BaseAdapter):
         "highCloudLayer": PrefixToSuffixRule(),
         "middleCloudLayer": PrefixToSuffixRule(),
         "lowCloudLayer": PrefixToSuffixRule(),
+        "convectiveCloudLayer": StepTypeSuffixRule(renames={"tcc": "tcc_conv"}),
+        "boundaryLayerCloudLayer": StepTypeSuffixRule(renames={"tcc": "tcc_bl"}),
     }

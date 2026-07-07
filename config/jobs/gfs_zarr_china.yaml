@@ -1,0 +1,25 @@
+# climate_restore job: gfs-0p25 → Zarr（中国区）
+#
+# 用法（单次）：
+#   uv run climate_restore run \
+#       --config config/jobs/gfs_zarr_china.yaml \
+#       --manifest /Users/zmy/pycharm/climate_pipeline/climate_data/gfs-0p25/20260101/12z/20260101_12z_gfs_og.manifest.json
+#
+# 批量（修改 batch_restore.py 的 CONFIG_YAML 指向此文件，DATE_START/END 设区间后运行）：
+#   python batch_restore.py
+
+download_root: /Users/zmy/pycharm/climate_pipeline/climate_data
+output_dir: /Users/zmy/pycharm/climate_pipeline/climate_data_storage/zarr
+bbox: [70.0, 140.0, 15.0, 55.0]  # west, east, south, north（中国区）
+workers: 10
+
+output_format: zarr
+zarr:
+  # step=-1：整段预报时序不分块，区域时序查询只需一个 chunk
+  # latitude/longitude=64：约 16°×16°，对省级/电网区域精准命中
+  # pressure_level=-1：压力层维整块，避免跨层碎片化
+  chunks: {step: -1, latitude: 64, longitude: 64, pressure_level: -1}
+  compressor: zstd
+  clevel: 3
+  consolidated: true   # xr.open_zarr 启动时只读一次 .zmetadata
+  zarr_format: 2

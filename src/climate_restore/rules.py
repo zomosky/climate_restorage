@@ -109,12 +109,26 @@ class StepTypeSuffixRule:
 
     Optional ``instant_renames`` lets a source rename specific instant vars
     (e.g. ``surface`` rule maps ``t`` to ``t_sfc`` to avoid collisions).
+
+    ``renames`` renames the *base* variable **before** the stepType suffix is
+    applied, for every stepType. Use it when the same cfgrib shortName ships
+    at several ``typeOfLevel``s that would otherwise collapse into one output
+    variable — e.g. GFS ships ``tcc`` at ``atmosphere`` (kept as ``tcc`` /
+    ``tcc_avg``), ``convectiveCloudLayer`` and ``boundaryLayerCloudLayer``; the
+    latter two rename to ``tcc_conv`` / ``tcc_bl`` so the avg boundary-layer
+    variant becomes ``tcc_bl_avg`` instead of colliding with atmosphere's
+    ``tcc_avg``.
     """
 
     instant_renames: dict[str, str] = field(default_factory=dict)
+    renames: dict[str, str] = field(default_factory=dict)
 
     def apply(self, ds, *, type_of_level, step_type):
         ds = _drop_level_coord(ds, type_of_level)
+        if self.renames:
+            base = {k: v for k, v in self.renames.items() if k in ds.data_vars}
+            if base:
+                ds = ds.rename(base)
         if step_type != "instant":
             ds = ds.rename({v: f"{v}_{step_type}" for v in ds.data_vars})
         elif self.instant_renames:

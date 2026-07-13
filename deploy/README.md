@@ -6,6 +6,13 @@ every newly-downloaded init under the shared data root into a per-source Zarr
 store. It mirrors the existing "host crontab → `.sh` → `docker exec`" pattern
 used for the download jobs.
 
+**Lock placement:** `flock` runs **on the host** and wraps `docker exec`, so the
+lock file lives on the host (not inside the container). Two overlapping cron
+ticks can't stack two scans while the host `docker exec` client is attached (it
+stays up until the in-container run exits). All other paths (`RESTORE_DIR`,
+`DATA_ROOT`, `OUT_DIR`, `JOB`) are **container-internal**; only `LOCK` is a host
+path.
+
 ## Why `scan-once` (not `watch`)
 
 `scan-once` makes one idempotent pass and exits, so it fits `docker exec` from
@@ -19,6 +26,8 @@ restart, so manifests that appear while it is down are skipped forever —
 
 - The dev container (`zhangmy-dev`) is running and **stays up** — cron reaches
   it via `docker exec`.
+- The cron user can run `docker` (member of the `docker` group, or root) —
+  otherwise `docker ps` / `docker exec` fail with permission denied.
 - Restore deps synced once inside it:
   ```sh
   docker exec -w /workspace/climate_restorage zhangmy-dev uv sync
@@ -42,15 +51,23 @@ Defaults match the `zhangmy-dev` container; override per host as needed.
 | var           | default                                     | meaning                                   |
 |---------------|---------------------------------------------|-------------------------------------------|
 | `CONTAINER`   | `zhangmy-dev`                               | dev container name                        |
-| `RESTORE_DIR` | `/workspace/climate_restorage`              | restore project dir inside the container  |
-| `DATA_ROOT`   | `/climate_data`                             | parent of all source subtrees to scan     |
-| `OUT_DIR`     | `/climate_data/climate_data_storage/zarr`   | where `<source>/<init>.zarr` is written   |
-| `JOB`         | `config/jobs/gfs_china.yaml`                | bbox / workers / zarr knobs (shared)      |
-| `LOCK`        | `/tmp/restore_scan.lock`                    | flock path (in-container)                 |
+| `RESTORE_DIR` | `/workspace/climate_restorage`              | restore project dir **inside the container** |
+| `DATA_ROOT`   | `/climate_data`                             | **inside**: parent of all source subtrees to scan |
+| `OUT_DIR`     | `/climate_data/climate_data_storage/zarr`   | **inside**: where `<source>/<init>.zarr` is written |
+| `JOB`         | `config/jobs/gfs_zarr_china.yaml`           | **inside** (relative to `RESTORE_DIR`): bbox / workers / zarr knobs (shared, source-agnostic) |
+| `SOURCE`      | *(empty)*                                   | empty = scan all sources; e.g. `gfs-0p25` to scope one subtree |
+| `LOCK`        | `/tmp/restore_scan.lock`                    | flock path **on the host** (its parent dir is auto-created) |
 
 `DATA_ROOT=/climate_data` is the common parent of `gfs-0p25`, `ifs-hres`,
 `graphcast-history`, and `aifs-single`, so one scan handles all four — the
 adapter for each init is chosen from its manifest's `source.name`.
+
+**The `JOB` config does NOT select a source** — it only carries bbox / workers /
+zarr knobs, which are shared across sources. So `JOB=…/gfs_zarr_china.yaml` still
+processes ifs/aifs/graphcast too; the filename is just a label. To restrict to
+one source, set `SOURCE` (→ `--source`), which is the *only* thing that narrows
+the scan to a single subtree. For genuinely per-source knobs, run one instance
+per source, pairing `SOURCE=<name>` with its own `JOB=<name>.yaml`.
 
 ## Behaviour & exit codes
 
@@ -70,7 +87,7 @@ docker exec -w /workspace/climate_restorage zhangmy-dev \
   uv run climate_restore scan-once \
     --download-root /climate_data \
     --output-dir    /climate_data/climate_data_storage/zarr \
-    --output-format zarr --config config/jobs/gfs_china.yaml
+    --output-format zarr --config config/jobs/gfs_zarr_china.yaml
 ```
 
 Check the closing `scan_done` log line: `processed / skipped / not_ready / failed`.

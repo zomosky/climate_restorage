@@ -191,6 +191,29 @@ def _output_complete(out_path: Path, fmt: OutputFormat, zarr_options: ZarrOption
     return out_path.is_file() and out_path.stat().st_size > 0
 
 
+def _output_fresh(
+    out_path: Path, fmt: OutputFormat, zarr_options: ZarrOptions, manifest_path: Path
+) -> bool:
+    """Is the finished output at least as new as its manifest?
+
+    Guards the "multiple download runs per init" pattern (used to ride out
+    upstream publish delay): an early run may write a manifest listing only the
+    forecast hours published so far — with no ``failures`` — so restore would
+    build a *partial* Zarr. When a later run rewrites the manifest with the
+    late-arriving steps, its mtime moves past the store's "done last" marker,
+    and this returns ``False`` so :func:`cmd_scan` rebuilds instead of skipping.
+    Compares the marker's mtime against the manifest's; missing marker → stale.
+    """
+    if format_suffix(fmt) == ".zarr":
+        marker = (out_path / ".zmetadata") if getattr(zarr_options, "consolidated", True) else out_path
+    else:
+        marker = out_path
+    try:
+        return marker.stat().st_mtime >= manifest_path.stat().st_mtime
+    except OSError:
+        return False
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     """One-shot, idempotent sweep over every manifest under the download root.
 
@@ -238,7 +261,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
             continue
 
         out_path = _out_path(output_dir, manifest, output_format)
-        if not args.force and _output_complete(out_path, output_format, job.zarr):
+        if (
+            not args.force
+            and _output_complete(out_path, output_format, job.zarr)
+            and _output_fresh(out_path, output_format, job.zarr, manifest_path)
+        ):
             _log.info("scan_skip_done", manifest=str(manifest_path), out_path=str(out_path))
             skipped += 1
             continue

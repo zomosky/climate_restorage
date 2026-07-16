@@ -1,4 +1,4 @@
-# climate_restore job: dwd-icon-operation → Zarr（中国区）
+# climate_restore job: dwd-icon → Zarr（中国区）
 #
 # 与 gfs 不同:ICON 全球是二十面体非结构网格,IconAdapter 会用最近邻把
 # `values` 单元重网格到规则经纬度(默认 0.125°,见 sources/icon.py 的 RES)。
@@ -7,7 +7,7 @@
 #
 # 用法(单次):
 #   uv run climate_restore run --config config/jobs/icon_zarr_china.yaml \
-#       --manifest .../dwd-icon-operation/<date>/12z/<...>.manifest.json
+#       --manifest .../dwd-icon/<date>/12z/<...>.manifest.json
 
 download_root: /Users/zmy/pycharm/climate_pipeline/climate_data
 output_dir: /Users/zmy/pycharm/climate_pipeline/climate_data_storage/zarr

@@ -31,11 +31,11 @@ from climate_restore.sources.registry import register
 __all__ = ["IconAdapter"]
 
 
-@register("dwd-icon-operation")
+@register("dwd-icon")
 class IconAdapter(BaseAdapter):
     """Restore adapter for DWD ICON global (icosahedral → regridded lat/lon)."""
 
-    name: ClassVar[str] = "dwd-icon-operation"
+    name: ClassVar[str] = "dwd-icon"
     description: ClassVar[str | None] = "DWD ICON global (icosahedral, regridded)"
 
     # Target regular-grid spacing (degrees) for the icosahedral → lat/lon remap.

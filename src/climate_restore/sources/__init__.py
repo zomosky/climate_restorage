@@ -20,6 +20,7 @@ from climate_restore.sources.registry import (
 from climate_restore.sources import aifs as _aifs  # noqa: F401
 from climate_restore.sources import gfs as _gfs  # noqa: F401
 from climate_restore.sources import graphcast as _graphcast  # noqa: F401
+from climate_restore.sources import icon as _icon  # noqa: F401
 
 __all__ = [
     "BaseAdapter",

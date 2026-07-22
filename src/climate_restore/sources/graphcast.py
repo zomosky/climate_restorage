@@ -24,6 +24,9 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+import numpy as np
+import xarray as xr
+
 from climate_restore.rules import (
     DimRenameRule,
     HeightSuffixRule,
@@ -31,16 +34,13 @@ from climate_restore.rules import (
     Rule,
     StepTypeSuffixRule,
 )
-from climate_restore.sources.base import BaseAdapter
+from climate_restore.sources.base import BaseAdapter, BBox
 from climate_restore.sources.registry import register
 
 __all__ = ["GraphCastAdapter"]
 
 
 @register("graphcast")
-@register("graphcast-history")
-@register("graphcast-pres")
-@register("graphcast-sfc")
 class GraphCastAdapter(BaseAdapter):
     """Restore adapter for the GraphCastGFS ``-sfc`` / ``-pres`` products.
 
@@ -65,5 +65,35 @@ class GraphCastAdapter(BaseAdapter):
         "heightAboveGround": HeightSuffixRule(unit="m"),
         "isobaricInhPa": DimRenameRule(dst_dim="pressure_level"),
         "meanSea": PassthroughRule(),
-        "surface": StepTypeSuffixRule(),
+        # The early EAGLE-SOLO archive encodes APCP with paramId 0, so eccodes
+        # decodes it as shortName ``unknown`` -> the suffix rule would name it
+        # ``unknown_accum``; the newer AIGFS product decodes the same field as
+        # ``tp`` -> ``tp_accum``. GraphCast's only surface-accumulated field is
+        # precipitation, so mapping ``unknown`` -> ``tp`` here makes precip land
+        # as ``tp_accum`` across BOTH eras (a no-op when it already decodes as
+        # ``tp``), keeping the archive uniform.
+        "surface": StepTypeSuffixRule(renames={"unknown": "tp"}),
     }
+
+    #: native grid resolution (deg); coords are snapped to this before cropping
+    GRID_RES: ClassVar[float] = 0.25
+
+    def crop_bbox(self, ds: xr.Dataset, bbox: BBox) -> xr.Dataset:
+        """Snap lon/lat onto the exact 0.25° grid, then crop.
+
+        The two GraphCast product eras encode longitude slightly differently:
+        the older EAGLE-SOLO *merged* archive carries a tiny floating-point
+        drift (global max ``359.750016`` instead of ``359.75``), so the 140°E
+        column lands at ~``140.00001`` and slips *outside* a ``slice(70, 140)``
+        crop — yielding a 280-column China grid, one short of the newer AIGFS
+        product's clean ``359.75`` (281 columns). Rounding each coord onto the
+        native ``GRID_RES`` grid before cropping makes **both** eras produce the
+        identical 281×161 China grid, so old- and new-format inits stitch into
+        one uniform series.
+        """
+        res = self.GRID_RES
+        for c in ("longitude", "latitude"):
+            if c in ds.coords:
+                snapped = np.round(np.asarray(ds[c].values, dtype="float64") / res) * res
+                ds = ds.assign_coords({c: snapped})
+        return super().crop_bbox(ds, bbox)

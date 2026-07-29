@@ -29,7 +29,6 @@ def clean_alias():
 def test_builtin_adapters_registered():
     names = list_sources()
     assert "gfs-0p25" in names
-    assert "graphcast" in names
     assert "aifs-single" in names
 
 

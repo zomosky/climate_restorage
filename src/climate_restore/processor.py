@@ -19,6 +19,8 @@ varies between GFS / AIFS / HRRR / ... lives in the adapter.
 
 from __future__ import annotations
 
+import json
+import math
 import shutil
 import sys
 import warnings
@@ -297,6 +299,52 @@ def write_dataset(
             zarr_format=opts.zarr_format,
             encoding=encoding,
         )
+        # 写后 chunk 完整性校验:截断(部分 chunk 没落盘)→ 删库 + 报错,
+        # 让上层重切,绝不把损坏库留成"已完成"(下游读到静默 NaN 或 500)。
+        truncated = _verify_zarr_chunks(out_path)
+        if truncated:
+            _remove_output(out_path)
+            raise ChunkIntegrityError(
+                f"{out_path.name} zarr 写入截断(部分 chunk 缺失),已删除待重切: "
+                + "; ".join(truncated)
+            )
         return
 
     raise ValueError(f"unknown output_format: {fmt!r}")
+
+
+class ChunkIntegrityError(RuntimeError):
+    """新写的 zarr 库有数组截断:元数据说该有 N 个 chunk,磁盘只写出 M<N 个
+    (静默 chunk 写失败 / 写入中断)。库被删除以便重切,不留成损坏的"已完成"产品。"""
+
+
+def _verify_zarr_chunks(store: Path) -> list[str]:
+    """返回 ["<数组>: <写出>/<应有>", ...] —— 写出 chunk 数 **少于** 元数据蕴含
+    数量(截断)的数组。全 fill 数组(写出=0)不报(可能合法);只报**部分写入**
+    (0<写出<应有):对中国区空间稠密的预报场,这意味着写没完成。step 是单 chunk,
+    故稀疏 step 维不会跳 chunk、不会误报。仅 consolidated(有 .zmetadata)时校验。"""
+    zm = store / ".zmetadata"
+    if not zm.is_file():
+        return []
+    try:
+        meta = json.loads(zm.read_text())["metadata"]
+    except Exception:
+        return []
+    bad: list[str] = []
+    for key, za in meta.items():
+        if not key.endswith("/.zarray"):
+            continue
+        arr = key[: -len("/.zarray")]
+        shape, chunks = za.get("shape"), za.get("chunks")
+        if not shape or not chunks:
+            continue
+        expected = 1
+        for s, c in zip(shape, chunks):
+            expected *= max(1, math.ceil(s / c))
+        d = store / arr
+        if not d.is_dir():
+            continue
+        got = sum(1 for f in d.iterdir() if not f.name.startswith("."))
+        if 0 < got < expected:
+            bad.append(f"{arr}: {got}/{expected}")
+    return bad

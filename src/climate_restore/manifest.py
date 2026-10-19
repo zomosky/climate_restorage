@@ -38,6 +38,7 @@ class Manifest:
     files: list[ManifestFile]
     failures: list[Any]
     manifest_path: Path
+    probability_availability: dict[str, Any] | None = None
 
     @property
     def root_dir(self) -> Path:
@@ -88,6 +89,7 @@ def load_manifest(manifest_path: Path) -> Manifest:
         files=files,
         failures=list(raw.get("failures", [])),
         manifest_path=Path(manifest_path).resolve(),
+        probability_availability=raw.get("probability_availability"),
     )
 
 

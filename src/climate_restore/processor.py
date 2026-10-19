@@ -81,7 +81,8 @@ def _decode_one_grib(
 ) -> list[tuple[tuple[str, ...], tuple[str, ...], xr.Dataset]]:
     grib_path, adapter, bbox = args
     out: list[tuple[tuple[str, ...], tuple[str, ...], xr.Dataset]] = []
-    for ds in _open_hypercubes(grib_path):
+    opener = getattr(adapter, "open_hypercubes", None)
+    for ds in (opener(grib_path) if opener is not None else _open_hypercubes(grib_path)):
         cropped = adapter.crop_bbox(ds, bbox)
         if cropped.sizes.get("latitude", 0) == 0 or cropped.sizes.get("longitude", 0) == 0:
             continue
@@ -170,6 +171,10 @@ def process_init(
     final = xr.merge(bucket_dss, compat="no_conflicts", join="outer")
     if "time" in final.coords and "step" in final.coords:
         final = final.assign_coords(valid_time=final["time"] + final["step"])
+
+    validator = getattr(adapter, "validate_product", None)
+    if validator is not None:
+        validator(final)
 
     write_dataset(
         final, out_path, fmt=output_format, zarr_options=zarr_options,

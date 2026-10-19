@@ -1,5 +1,35 @@
 # climate_restore
 
+## ENS 事件概率
+
+`ifs-ens-probabilities` 和 `aifs-ens-probabilities` 复用每起报 manifest 处理链。
+240h/360h 是两个多时间下载包；IFS 合计 5 个字段、145 个窗口样本，AIFS 合计
+25 个字段、313 个窗口样本。日常要求两个包及全部预期窗口齐备。
+历史回填使用 manifest 的 `probability_availability`，记录上游实际可用及缺少的字段/窗口，
+逐项核验实际可用集合后发布；网络/处理失败仍不得作为上游缺失。IFS旧0.4°网格与0.25°网格分别按原网格保留，核验与回执中声明的间距一致。
+
+概率始终保留百分比 `%`，`GRIB_stepType=accum/max/avg` 描述的是事件的统计方式，
+不能把概率本身当作降水累计量或阵风最大值进行差分。每个变量写入
+`zrread_kind=probability`、阈值及单位、`probability_type`、比较方式、原始阈值、
+`probability_statistic` 和 `probability_window_hours`。
+`probability_window_start_coord/end_coord` 指向该变量逐样本的 UTC 窗口边界坐标。
+瞬时字段起止相同；原 24h 降水/阵风字段保持参数名。多日字段按统计方式和时长拆分，
+例如 `2tl273_max48h/max72h/max120h`、`tpl01_accum120h`、`tprg3_avg120h`。
+其中多日 `2tl273` 是**区间最高气温低于 0℃**的概率。
+
+重整先按 GRIB 参数、模板、统计类型和时长拆分解码，再裁剪/合并。适配器可提供
+`open_hypercubes(path)` 与 `validate_product(dataset)` 扩展点；后者在写盘前检查
+字段、全部原始窗口、0–100 范围以及时间边界，失败不写完整标记。
+根属性 `probability_complete=1`、JSON 字符串 `probability_expected_samples` 和
+逐变量 `probability_sample_count` 是监控使用的验收回执。
+历史产品的 `probability_complete=1` 指声明的可用数据已完整处理，
+`probability_catalog_complete=0` 则明确它不具备当前完整目录；缺项不能补零。
+`scripts/restore_probability_history.py` 校验原始 SHA-256，在隐藏暂存目录处理、全量读回后发布。
+
+```sh
+uv run climate_restore scan-once --download-root /climate_data --source ifs-ens-probabilities --output-dir /climate_data/climate_data_storage/zarr --output-format zarr --workers 1
+```
+
 气象数据的再加工子项目，把下载后输出的多 step `*.subset.grib2` 文件按一次起报（`date + cycle`）合并成 **一个扁平 NetCDF / Zarr**：裁剪到中国区域、按 step 时间拼接、所有变量重命名为阅读友好的 shortName 风格。
 
 输出格式可在 YAML 或 CLI 切换（`output_format: netcdf | zarr`），下游可直接 `xr.open_dataset(...)['u100m']` 或 `xr.open_zarr(...)['u100m']` 拿到 `(step, lat, lon)` 的整段时间序列，无需再处理 GRIB / cfgrib。

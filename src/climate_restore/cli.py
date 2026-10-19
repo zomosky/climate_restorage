@@ -78,6 +78,9 @@ def _process_one(
     if cli_zarr_chunks is not None:
         zarr_options = zarr_options.model_copy(update={"chunks": cli_zarr_chunks})
     adapter = _resolve_adapter(manifest, cli_source_type)
+    configure = getattr(adapter, "configure_manifest", None)
+    if configure is not None:
+        configure(manifest)
 
     _log.info(
         "verify_start",
@@ -248,6 +251,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
         except Exception as exc:
             _log.error("scan_manifest_load_failed", manifest=str(manifest_path), error=str(exc))
             failed += 1
+            continue
+
+        if (not manifest.files and manifest.probability_availability
+                and manifest.probability_availability.get("status") == "unavailable"):
+            _log.info("scan_upstream_unavailable", manifest=str(manifest_path))
+            skipped += 1
             continue
 
         if manifest.completed_at is None or manifest.failures:

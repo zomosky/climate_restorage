@@ -196,6 +196,13 @@ climate_restore list-sources
 | `gfs-0p25` | `GfsAdapter` | NOAA GFS 0.25° atmos forecast (wgrib2 idx) |
 | `graphcast-sfc` / `graphcast-pres` / `graphcast` / `graphcast-history` | `GraphCastAdapter` | NOAA NWS GraphCastGFS (aigfs)，sfc + pres 两份独立 manifest |
 | `aifs-single` / `ifs-hres` | `AifsAdapter` | ECMWF AIFS / IFS HRES (open-data) |
+| `ifs-hres-0p1` | `IfsHres0p1Adapter` | ECMWF IFS 0.1°，独立于原 `ifs-hres` 0.25°；命名规则沿用 IFS |
+
+`ifs_0p1_zarr_china_ser.yaml` 将新源裁到 70–140°E、15–55°N，保留原生
+0.1° 网格（401×701），以 2 个解码进程写入独立 Zarr 目录。适配器按 GRIB
+的微度精度规范化经纬度，避免浮点误差漏掉裁剪边界；不改变气象数值或插值。
+每份 `fNNN.subset.grib2` 只保留编码时效等于文件时效的场，跳过 f000 中指向
+f003 的零值最高/最低温预览，防止其覆盖真实 f003 数据。不存在的原生场保持 NaN。
 
 GraphCast 每次起报会落两份 manifest（`-sfc` / `-pres`），各自处理成各自的 `.nc` / `.zarr`；下游若要"一次起报的完整状态"，可对同一 (date, cycle) 的两个文件 `xr.open_mfdataset` 合并。`-pres` 内部不同变量覆盖的压力层不一致（`t/u/v/gh` 在 [1000, 850, 500]，`q` 仅 [1000, 850]，`w` 在 [925, 850, 700, 500]），合并后 `pressure_level` 取并集 `[500, 700, 850, 925, 1000]`，未覆盖位置为 NaN。
 

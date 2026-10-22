@@ -21,6 +21,7 @@ from climate_restore.sources import aifs as _aifs  # noqa: F401
 from climate_restore.sources import probabilities as _probabilities  # noqa: F401
 from climate_restore.sources import gfs as _gfs  # noqa: F401
 from climate_restore.sources import icon as _icon  # noqa: F401
+from climate_restore.sources import ifs_0p1 as _ifs_0p1  # noqa: F401
 
 __all__ = [
     "BaseAdapter",

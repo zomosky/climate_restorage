@@ -1,0 +1,13 @@
+# Separate 0.1-degree product; existing 0.25-degree restore jobs are untouched.
+download_root: /climate_data
+output_dir: /climate_data/climate_data_storage/zarr
+bbox: [70.0, 140.0, 15.0, 55.0]
+# A 0.1-degree China crop has 6.25x the cells: keep decode parallelism bounded.
+workers: 2
+output_format: zarr
+zarr:
+  chunks: {step: -1, latitude: 64, longitude: 64, pressure_level: -1}
+  compressor: zstd
+  clevel: 3
+  consolidated: true
+  zarr_format: 2

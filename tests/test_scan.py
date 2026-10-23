@@ -56,7 +56,7 @@ def _make_complete_zarr(output_dir: Path, *, date: str, cycle: int, source: str 
     """Create a store that ``_output_complete`` accepts (consolidated marker present)."""
     store = output_dir / source / f"{date}_{cycle:02d}z_{source}.zarr"
     store.mkdir(parents=True, exist_ok=True)
-    (store / ".zmetadata").write_text("{}", encoding="utf-8")
+    (store / ".zmetadata").write_text('{"metadata": {}}', encoding="utf-8")
     return store
 
 
@@ -162,3 +162,20 @@ def test_scan_returns_nonzero_on_processing_failure(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(cli, "_process_one", boom)
     rc = cli.cmd_scan(_scan_args(download_root, output_dir))
     assert rc == 1  # a ready manifest failed -> alertable exit code
+
+
+def test_completed_scan_reports_index_failure_and_retry_repairs_without_decode(tmp_path, monkeypatch):
+    from climate_restore import coverage_index
+    download_root, output_dir = tmp_path/'raw', tmp_path/'out'
+    _write_manifest(download_root, date='20260622', cycle=12)
+    _make_complete_zarr(output_dir, date='20260622', cycle=12)
+    def no_decode(*a, **kw):
+        pytest.fail('complete product must repair its index without decoding GRIB')
+    monkeypatch.setattr(cli, '_process_one', no_decode)
+    publish = coverage_index.update_store
+    def fail(_):
+        raise OSError('index unavailable')
+    monkeypatch.setattr(coverage_index, 'update_store', fail)
+    assert cli.cmd_scan(_scan_args(download_root, output_dir)) == 1
+    monkeypatch.setattr(coverage_index, 'update_store', publish)
+    assert cli.cmd_scan(_scan_args(download_root, output_dir)) == 0

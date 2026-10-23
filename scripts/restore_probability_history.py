@@ -11,6 +11,7 @@ import shutil
 import numpy as np
 import xarray as xr
 
+from climate_restore.coverage_index import update_store
 from climate_restore.config import ZarrOptions
 from climate_restore.manifest import load_manifest, verify
 from climate_restore.processor import process_init
@@ -52,6 +53,7 @@ def restore(path: Path, output: Path) -> dict:
         with xr.open_zarr(store, consolidated=True, chunks=None) as ds:
             ds.load()
             validate_dataset(ds,manifest,adapter)
+        update_store(store)
         receipt.update(status="done", resumed=True, variables=len(ds.data_vars))
         return receipt
     staging = store.with_name(f".{name}.staging")
@@ -81,6 +83,7 @@ def restore(path: Path, output: Path) -> dict:
         shutil.rmtree(backup)
     else:
         os.replace(staging, store)
+    update_store(store)
     return receipt
 
 

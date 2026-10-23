@@ -275,6 +275,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
             and _output_complete(out_path, output_format, job.zarr)
             and _output_fresh(out_path, output_format, job.zarr, manifest_path)
         ):
+            if output_format == "zarr":
+                from climate_restore.coverage_index import update_store
+                try:
+                    update_store(out_path)
+                except Exception as exc:
+                    _log.error("coverage_index_failed", out_path=str(out_path), error=str(exc))
+                    failed += 1
+                    continue
             _log.info("scan_skip_done", manifest=str(manifest_path), out_path=str(out_path))
             skipped += 1
             continue
@@ -355,6 +363,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="reprocess even if the output already exists")
     _add_common(p_scan)
     p_scan.set_defaults(func=cmd_scan)
+
+    from climate_restore.coverage_index import main as coverage_main
+    p_index = sub.add_parser("coverage-index", help="build or update forecast coverage index")
+    p_index.add_argument("index_args", nargs=argparse.REMAINDER)
+    p_index.add_argument("--log-level", default="INFO")
+    p_index.set_defaults(func=lambda a: coverage_main(a.index_args))
 
     p_ls = sub.add_parser("list-sources", help="list registered source adapters")
     p_ls.add_argument("--log-level", default="INFO")

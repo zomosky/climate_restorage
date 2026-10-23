@@ -285,3 +285,36 @@ uv run pytest -q
 接收下载端完整52变量、5732消息的每起报manifest，输出完整0–120h逐小时联合坐标；7个3小时变量在非原生时效保持缺测。
 9个辐射能量和2个降水变量只规范累计属性并保留源属性，原值不变；过去3小时阵风统一为max，AOD保持instant。
 下载、恢复及生产运行约束见下载项目 [CAMS.md](../download/docs/CAMS.md)。
+
+
+## 预报变量覆盖索引
+
+正式 Zarr 写入并通过 chunk 校验后，自动增量更新同一共享根目录下的
+`.catalog/<source>.sqlite3`。每次只读取当前起报的完整分片和小型气压坐标；
+重复起报按元数据指纹跳过，回填较早起报和覆盖重写会修正覆盖范围与缺项标记。
+普通 run/scan-once/batch 与概率历史回填都已接入，隐藏暂存库不发布。
+索引写入失败会使任务失败；完整产品的幂等跳过/历史续跑会补发索引，无需重解 GRIB。
+
+既有历史及新源需显式初始化一次；第一次单个起报更新不会宣称全部历史已登记：
+
+```sh
+uv run climate_restore coverage-index rebuild --root /path/to/zarr --all
+uv run climate_restore coverage-index rebuild --root /path/to/zarr --source ifs-ens-probabilities
+```
+
+首次上线顺序：更新重整端 → 初始化全部源索引 → 更新 watcher。后续入库、历史回填
+和重试自动更新。重建逐源加锁并原子替换；失败保留旧库，不影响正式 Zarr。
+watcher 使用只读事务，不需要在数据卷创建 WAL/shm；不要改用 WAL journal。
+
+外部工具发布后可以 `coverage-index update --store <正式路径>`；手工删除正式库前可
+`coverage-index remove --store <原路径>` 撤回整个起报。remove 不删除数据。
+外部手工改动/备份恢复不自动探测，应补发或重建；GRIB 原始冷归档无需变更索引。
+`rebuild --index-dir /tmp/audit/.catalog` 允许只读审计时把结果写到独立临时目录。
+
+持久协议 v1：state(version,source,ready,total,first_init,last_init)；
+products(init,definitions,signature) 保存暴露名/base/level/attrs；
+product_variables(init,name) 保存基础名和暴露名成员；
+coverage(name,first_init,last_init,count) 保存物化聚合。按源 flock，SQLite DELETE
+journal + FULL synchronous，更新一个事务、读端一个只读快照。coverage 表示包含字段的
+已发布起报范围，不保证每个格点/每个概率窗口无缺失。详细上线、修复、备份和回滚
+说明见同级 watcher 的 `docs/forecast-coverage-index.md`。

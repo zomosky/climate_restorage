@@ -182,6 +182,9 @@ def main() -> int:
             m = load_manifest(mp)
             out_path = _out_path_for(m, output_dir, out_suffix)
             if SKIP_EXISTING and out_path.exists():
+                if out_path.suffix == ".zarr":
+                    from climate_restore.coverage_index import update_store
+                    update_store(out_path)
                 log.info("skip_existing", out=str(out_path))
                 skipped += 1
                 continue

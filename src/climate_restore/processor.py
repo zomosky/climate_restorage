@@ -287,6 +287,9 @@ def write_dataset(
     optionally consolidated for fast metadata reads.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "zarr":
+        from climate_restore.coverage_index import remove_store
+        remove_store(out_path)
     _remove_output(out_path)
 
     if fmt == "netcdf":
@@ -313,6 +316,8 @@ def write_dataset(
                 f"{out_path.name} zarr 写入截断(部分 chunk 缺失),已删除待重切: "
                 + "; ".join(truncated)
             )
+        from climate_restore.coverage_index import update_store
+        update_store(out_path)
         return
 
     raise ValueError(f"unknown output_format: {fmt!r}")

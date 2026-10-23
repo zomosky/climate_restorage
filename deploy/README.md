@@ -141,3 +141,50 @@ SOURCES='ifs-ens-probabilities aifs-ens-probabilities' DRY_RUN=1 \
 新增路径变量 `CZARR`、`CCOLD` 分别用于容器内的 Zarr、冷端根目录；`CHOT`
 是容器内原始根目录。默认对应现有挂载，不允许把生产 Zarr 改为冷存目标。
 回滚恢复备份的宿主机脚本即可；校验器不修改数据，也不需要重建服务镜像。
+
+
+## 覆盖索引自动巡检
+
+日常入库/回填已即时增量维护索引；此任务为外部改动、新源和索引故障提供兜底。
+不改变数据或 Web 服务，仅对 `.catalog` 发布原子事务或重建后的原子替换。未变化产品只读取
+`.zmetadata` 的文件属性；正常索引检查状态、计数和最新变量覆盖记录，有变化才解析相应元数据。首次为旧库补齐小型 `maintenance_product_signatures` 覆盖索引，后续写入由 SQLite 自动维护，避免周期性读取历史大段说明。
+缺失、未初始化或损坏的索引才逐源重建。失败保留旧库，后续调度自动重试。
+
+将 `coverage_index_maintain.py` 放在生产容器内的重整 `deploy/` 目录，将
+`coverage_index_maintain_host.py` 放在宿主机 operation 目录。也可将 worker 作为
+固定版本的独立运维文件安装，并用 `--worker` 指向其容器内路径，不修改运行中的生产包。
+宿主机先只读检查，确认后加入 `--apply`：
+
+```sh
+python3 /home/zhangmingyu/operation/coverage-index-maintain.py
+python3 /home/zhangmingyu/operation/coverage-index-maintain.py --apply
+```
+
+生产调度（每半小时，避开整十分钟的重整扫描）：
+
+```cron
+7,37 * * * * /usr/bin/python3 /home/zhangmingyu/operation/coverage-index-maintain.py --apply >> /home/zhangmingyu/operation/logs/coverage-index-maintenance.log 2>&1
+```
+
+host 脚本通过自身位置确定 operation 目录，可用 `--operation-dir` 覆盖。
+复用 `lock/restore_scan{,_aifs,_ifs,_icon,_ifs_0p1}.lock`、
+`lock/ens_probabilities.lock` 及 `/tmp/restore_cams.lock`；任一忙则跳过该轮，
+不会排队叠加。新增独立生产调度时，使用 `--extra-lock /path/to/new.lock` 加入它的锁。
+非调度的手工处理也应持有对应锁。全局维护锁防止多份巡检同时运行。
+
+worker 仅此进程设置单 CPU 核心、低优先级、1 GiB 地址空间上限、120 秒执行期限，
+Zarr/BLAS 单线程；host 外层超时为 150 秒。容器资源、原有调度和 Web 无需修改。
+元数据不足 120 秒暂缓该源；源目录消失保留旧库并报错，空源目录保留则会撤回全部起报。
+日志进入已有 `logs/*.log` 轮转；`logs/coverage-index-maintenance-status.json` 保存最近状态。
+
+本工具不校验所有数据块，也不能识别刻意保持大小/修改时间的元数据变更；此时需显式重建。
+重建索引不能修复不完整的 Zarr；外部工具应先生成正确的 consolidated `.zmetadata`。
+手工强制元数据重建（持有对应生产调度锁后执行）可加 `--force-rebuild`：
+
+```sh
+docker exec -e OPENBLAS_NUM_THREADS=1 -e OMP_NUM_THREADS=1 -w /workspace/climate_restorage zhangmy-dev \
+  .venv/bin/python deploy/coverage_index_maintain.py --root /climate_data/climate_data_storage/zarr \
+  --source ifs-hres --apply --force-rebuild
+```
+
+回滚只需移除这一段 crontab 和巡检入口；无需撤销索引或重启服务。入库的即时维护继续工作。

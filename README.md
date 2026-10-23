@@ -295,7 +295,7 @@ uv run pytest -q
 普通 run/scan-once/batch 与概率历史回填都已接入，隐藏暂存库不发布。
 索引写入失败会使任务失败；完整产品的幂等跳过/历史续跑会补发索引，无需重解 GRIB。
 
-既有历史及新源需显式初始化一次；第一次单个起报更新不会宣称全部历史已登记：
+既有历史及新源需初始化一次，可显式执行或由后台巡检在产品稳定后完成；第一次单个起报更新不会宣称全部历史已登记：
 
 ```sh
 uv run climate_restore coverage-index rebuild --root /path/to/zarr --all
@@ -308,7 +308,7 @@ watcher 使用只读事务，不需要在数据卷创建 WAL/shm；不要改用 
 
 外部工具发布后可以 `coverage-index update --store <正式路径>`；手工删除正式库前可
 `coverage-index remove --store <原路径>` 撤回整个起报。remove 不删除数据。
-外部手工改动/备份恢复不自动探测，应补发或重建；GRIB 原始冷归档无需变更索引。
+外部手工改动/备份恢复可补发或重建，也可由 `deploy/coverage_index_maintain.py` 定时比对元数据指纹并修复。新源、缺失/未初始化/损坏索引自动重建；正常源只更新变化的起报，失败保留旧索引。生产宿主机每小时第 7、37 分钟执行，复用现有重整调度锁；安装和资源限制见 `deploy/README.md`。GRIB 原始冷归档无需变更索引。
 `rebuild --index-dir /tmp/audit/.catalog` 允许只读审计时把结果写到独立临时目录。
 
 持久协议 v1：state(version,source,ready,total,first_init,last_init)；

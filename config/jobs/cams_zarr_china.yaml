@@ -1,0 +1,12 @@
+# Complete CAMS manifests only; one decoder worker; sparse native leads retained.
+download_root: /climate_data
+output_dir: /climate_data/climate_data_storage/zarr
+bbox: [70.0, 140.0, 15.0, 55.0]
+workers: 1
+output_format: zarr
+zarr:
+  chunks: {step: -1, latitude: 64, longitude: 64, pressure_level: -1}
+  compressor: zstd
+  clevel: 3
+  consolidated: true
+  zarr_format: 2

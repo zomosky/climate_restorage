@@ -278,3 +278,10 @@ uv run pytest -q
 - `tests/test_registry.py` — 注册 / 查找 / 重名抛错 / 排序
 - `tests/test_scan.py` — `scan-once` 幂等性 / 就绪判定
 - `tests/test_gfs_golden.py` — 对 `../download/output/.../f001.subset.grib2` 跑 GFS adapter，断言产出的变量名集合（fixture 缺失时自动 skip）
+
+## CAMS 全球大气成分预报
+
+`ec_cams` 已注册独立adapter，任务配置为 `config/jobs/cams_zarr_china.yaml`（单worker）。
+接收下载端完整52变量、5732消息的每起报manifest，输出完整0–120h逐小时联合坐标；7个3小时变量在非原生时效保持缺测。
+9个辐射能量和2个降水变量只规范累计属性并保留源属性，原值不变；过去3小时阵风统一为max，AOD保持instant。
+下载、恢复及生产运行约束见下载项目 [CAMS.md](../download/docs/CAMS.md)。

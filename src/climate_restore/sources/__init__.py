@@ -18,6 +18,7 @@ from climate_restore.sources.registry import (
 
 # Side-effect imports: each module's @register call populates SOURCE_REGISTRY.
 from climate_restore.sources import aifs as _aifs  # noqa: F401
+from climate_restore.sources import cams as _cams  # noqa: F401
 from climate_restore.sources import probabilities as _probabilities  # noqa: F401
 from climate_restore.sources import gfs as _gfs  # noqa: F401
 from climate_restore.sources import icon as _icon  # noqa: F401

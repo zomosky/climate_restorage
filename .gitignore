@@ -24,4 +24,10 @@ build/
 output/
 
 
+AGENTS.md
 CLAUDE.md
+
+# Local validation outputs and scratch files
+/docs/validation/
+/artifacts/
+/tmp/

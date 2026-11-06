@@ -145,30 +145,34 @@ def process_init(
             for vars_sig, dim_sig, renamed in _decode_one_grib((p, adapter, bbox)):
                 buckets.setdefault((vars_sig, dim_sig), []).append(renamed)
 
-    bucket_dss: list[xr.Dataset] = []
-    for (vars_sig, _dim_sig), ds_list in buckets.items():
-        merged = xr.concat(
-            ds_list, dim="step", coords="minimal", compat="override", join="outer"
-        ).sortby("step")
-        # ECMWF ships some accumulated/min/max records (e.g. mx2t3 at step=3h)
-        # in both the f000 preview and the canonical step file. Keep the last
-        # occurrence per step; meteorological semantics make the values
-        # identical, but the later forecast pass is the authoritative one.
-        if "step" in merged.dims:
-            merged = merged.drop_duplicates("step", keep="last")
-        # Drop per-bucket valid_time; rebuilt on the merged step axis below
-        # (concat with coords='minimal' may already have dropped it).
-        merged = merged.drop_vars("valid_time", errors="ignore")
-        bucket_dss.append(merged)
-        _log.debug(
-            "concat_bucket",
-            vars=list(vars_sig),
-            steps=int(merged.sizes.get("step", 0)),
-            lat=int(merged.sizes.get("latitude", 0)),
-            lon=int(merged.sizes.get("longitude", 0)),
-        )
+    merger = getattr(adapter, "merge_hypercubes", None)
+    if merger is not None:
+        final = merger([ds for group in buckets.values() for ds in group])
+    else:
+        bucket_dss: list[xr.Dataset] = []
+        for (vars_sig, _dim_sig), ds_list in buckets.items():
+            merged = xr.concat(
+                ds_list, dim="step", coords="minimal", compat="override", join="outer"
+            ).sortby("step")
+            # ECMWF ships some accumulated/min/max records (e.g. mx2t3 at step=3h)
+            # in both the f000 preview and the canonical step file. Keep the last
+            # occurrence per step; meteorological semantics make the values
+            # identical, but the later forecast pass is the authoritative one.
+            if "step" in merged.dims:
+                merged = merged.drop_duplicates("step", keep="last")
+            # Drop per-bucket valid_time; rebuilt on the merged step axis below
+            # (concat with coords='minimal' may already have dropped it).
+            merged = merged.drop_vars("valid_time", errors="ignore")
+            bucket_dss.append(merged)
+            _log.debug(
+                "concat_bucket",
+                vars=list(vars_sig),
+                steps=int(merged.sizes.get("step", 0)),
+                lat=int(merged.sizes.get("latitude", 0)),
+                lon=int(merged.sizes.get("longitude", 0)),
+            )
 
-    final = xr.merge(bucket_dss, compat="no_conflicts", join="outer")
+        final = xr.merge(bucket_dss, compat="no_conflicts", join="outer")
     if "time" in final.coords and "step" in final.coords:
         final = final.assign_coords(valid_time=final["time"] + final["step"])
 
@@ -267,6 +271,10 @@ def _build_zarr_encoding(
             dim_chunks.get(dim, int(da.sizes[dim])) for dim in da.dims
         )
         spec: dict = {"chunks": chunk_shape}
+        # Adapters may require explicit fill chunks for structurally sparse axes.
+        # Keep this storage hint when replacing the variable's chunk encoding.
+        if "write_empty_chunks" in da.encoding:
+            spec["write_empty_chunks"] = da.encoding["write_empty_chunks"]
         if compressor is not None:
             spec["compressor"] = compressor
         encoding[var] = spec

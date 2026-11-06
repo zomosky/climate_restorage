@@ -1,5 +1,7 @@
 # climate_restore
 
+GEFS 命名已统一为 `gefs-ens`（成员预测）和 `gefs-ctrl`（控制预测）。旧 `gefs-s2s` / `gefs-s2s-control` 产品仍可读取；同时存在新旧名称时自动目录优先展示新名称。下载命令 `gefs-s2s` 保留为 `gefs-ens` 的兼容别名，新产物使用新名称。
+
 ## ENS 事件概率
 
 `ifs-ens-probabilities` 和 `aifs-ens-probabilities` 复用每起报 manifest 处理链。
@@ -318,3 +320,96 @@ coverage(name,first_init,last_init,count) 保存物化聚合。按源 flock，SQ
 journal + FULL synchronous，更新一个事务、读端一个只读快照。coverage 表示包含字段的
 已发布起报范围，不保证每个格点/每个概率窗口无缺失。详细上线、修复、备份和回滚
 说明见同级 watcher 的 `docs/forecast-coverage-index.md`。
+
+## ECMWF S2S 成员与原始窗口
+
+接受 `schema_version=1, kind=s2s` 的组清单，`files[]` 保留 `group/request`，
+不要求或伪造 `step_hours`；普通预报清单仍要求该字段。
+`s2s-ecmwf` 用于控制预报；原同名清单若声明 `perturbed_forecast`，输出源自动
+规范为 `s2s-ecmwf-perturbed`。实验组合清单可显式使用
+`s2s-ecmwf-ensemble` 和 `source.forecast_type=ensemble`，每个文件的
+`request.forecast_type` 分别声明控制或扰动预报，三种产物互不覆盖。
+
+输出保留 `step/member/latitude/longitude`（压力层另有 `pressure_level`）；
+控制成员也保留长度 1 的整数 `member=0`。变量沿用 `u10/v10/msl`、
+`t2m_avg/d2m_avg/tcc_avg`、`ssrd_accum/strd_accum/tp_accum` 和压力层 `u/v/t/gh`。
+每变量的 `s2s_sample_present_coord`、`s2s_window_start_coord`、
+`s2s_window_end_coord` 属性指向按 GRIB 消息记录的非空间维坐标。
+未发布组合保留 `presence=False`、窗口 `NaT`、数值 `NaN`；实际消息即使
+全部格点为 NaN，仍标为存在。累计窗口从起报开始，平均保留真实区间，瞬时起止相同。
+窗口标注 `zrread_time_boundary=1, timezone=UTC`，并显式使用带缺测值的
+float64 CF 时间编码，避免稀疏 NaT 在 Zarr/NetCDF 读回时溢出。
+
+处理前验证每文件起报、网格、成员类型、集合规模、请求变量/层/原生窗口；
+缺成员、重复参数/层/成员/时效、混起报和窗口冲突均报错。历史组清单虽可能
+统一请求 6h，海平面气压、辐射及压力层仅检查 ECMWF 的 24h 原生时效。
+同变量控制/扰动按坐标合并，不使用确定性路径的 step 去重。
+根属性 `s2s_message_coverage` 逐变量记录真实成员及样本数，`s2s_complete=1`
+仅表示已声明请求的覆盖校验通过，不意味着每个变量都包含 101 个成员。
+
+cfgrib 先保持惰性，再按单成员切块、区域裁剪后加载；由于 cfgrib 内部会先解
+完整空间场，单成员切块防止全球全集合同时进入内存。查询常按成员读取时，
+建议显式设置分块（不改变其他源默认值）：
+
+```sh
+uv run climate_restore run --manifest /path/to/s2s.manifest.json \
+  --output-format zarr --workers 1 \
+  --zarr-chunks member=1,step=28,latitude=32,longitude=32
+```
+
+本轮仅实现上述 ECMWF S2S 参数；不自动插值为 15 分钟，不将源累计值在重整阶段差分。
+
+电力核心字段补充 `sp`（地面气压，0–1104h 每 24h）及
+`mx2t6_max` / `mn2t6_min`（过去 6 小时最高/最低 2m 气温，6–1104h 每 6h）。
+它们分别对应 ecCodes 参数 134、121、122；极值必须保持原始
+`[end−6h,end]` 窗口，不能当瞬时温度或累计量处理，也不存在 0h 极值样本。
+新增三字段当前通过本地合成 GRIB 解码/写盘验证，真实下载验收另行记录。
+
+## GEFS 35 天指定成员预测
+
+`gefs-ens` 是独立的 NOAA 0.5° 集合源，使用普通 `schema_version=1`
+逐步清单；每文件必须有 `step_hours`，不使用 ECMWF 的 `kind=s2s`。
+`variables` 按输出名声明，例如 `[{"name":"t2m"}, ...]`；完整目标为
+`t2m/d2m/r2/u10/v10/u100/v100/sp/prmsl/tmax2m_max/tmin2m_min/tp_accum/sdswrf_avg/sdlwrf_avg/tcc_avg`。
+原生时效为 0–240h 每 3h、246–840h 每 6h，合计 181 步。
+每个成员的完整目标在 0h 仅有 9 个瞬时场，其余 180 步各 15 场，共 2709 条消息；
+0h 未发布的统计场保持 NaN、presence=False 和窗口 NaT。
+
+清单的 `source.members` 指定本次成员，如 `[0,1,2,3,4]` 为c00与p01–p04；
+支持非空、无重复的0–30整数名单，也允许仅扰动成员如 `[1,7,30]`。
+旧清单未声明 `members` 时，按原 `source.member`（默认0）处理，保留单控制成员兼容。
+每步文件须包含所有声明成员×字段；逐消息校验成员身份：c00为cf/type1，p01–p30为pf/type3。
+原始头中的30是扰动成员总数，不表示本次下载了30个成员；实际数量以`member`维和
+`gefs_actual_member_count`为准。混合成员产物不保留误导性的单一GRIB成员类型属性，
+各成员类型记录在`gefs_member_types`。
+
+`gefs_complete_horizon=1`表示所选成员的15字段/181步完整；不表示全31成员。
+`gefs_full_ensemble=1`仅表示成员轴恰为0–30；两个标记同时为1才表示全成员全时效。
+切勿将不同成员配置写到同一产品目录后依赖scan-once覆盖：它按已存在产品跳过。
+实验下载按日期×成员名单×时效生成独立目录，扩充成员需在独立目录重整后再验收。
+合并时先按变量/成员拼接不重复时效，再对齐成员轴，避免每条消息都提前扩展成整轮网格；
+成员时效缺口、重复消息和网格一致性校验保留。
+
+
+复用 `s2s_present__*` / `s2s_window_start__*` / `s2s_window_end__*`
+坐标及逐变量属性引用。保留原始 `GRIB_stepType`、单位和真实窗口：例如
+降水及平均辐射可为 0–3、0–6、6–9、6–12h，不能当作从起报连续累计。
+辐射原值是 W/m² 平均通量；重整不差分、不改窗口、不转换成 ECMWF 累计量。
+读取侧按真实原窗口单独处理 GEFS；所选成员预测不自动生成校准集合概率产品。
+
+### 从已有成员产品发布控制入口
+
+```bash
+uv run climate_restore export-gefs-control \
+  --input /path/to/gefs-s2s/20261029_00z_gefs-s2s.zarr \
+  --output-dir /path/to/zarr
+```
+
+只抽取已有产品的成员0，不重新下载或解码。输出为
+`gefs-s2s-control/20261029_00z_gefs-s2s-control.zarr`，物理保留`member=[0]`及
+全部变量窗口、presence和缺失值，并重算控制成员覆盖摘要与成员属性，记录父产品出处。
+临时目录写入、重新读取逐值核验后才原子发布；重复运行逐值核验已有输出，完全相同即复用，
+不同则报错且保留原成品，不隐式覆盖。成功发布更新覆盖索引。
+
+生产 GEFS 使用 `deploy/gefs_publish.py`：完整原始清单校验后在隐藏暂存目录切片，
+全量解码验证通过才原子发布成员与控制产品；由下载项目 `deploy/gefs_run.py` 调用。

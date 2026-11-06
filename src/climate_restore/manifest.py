@@ -12,18 +12,20 @@ cfgrib open step in the processor.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 @dataclass(frozen=True)
 class ManifestFile:
-    step_hours: int
+    step_hours: int | None
     path: Path
     size_bytes: int
     sha256: str
     records_selected: int
+    group: str | None = None
+    request: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,8 @@ class Manifest:
     failures: list[Any]
     manifest_path: Path
     probability_availability: dict[str, Any] | None = None
+    kind: str | None = None
+    source_metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def root_dir(self) -> Path:
@@ -67,20 +71,29 @@ def load_manifest(manifest_path: Path) -> Manifest:
         raise ValueError(
             f"unsupported manifest schema_version: {raw.get('schema_version')!r}"
         )
+    kind = raw.get("kind")
+    source = dict(raw["source"])
+    source_name = str(source["name"])
+    if (kind == "s2s" and source_name == "s2s-ecmwf"
+            and source.get("forecast_type") == "perturbed_forecast"):
+        source_name = "s2s-ecmwf-perturbed"
     files = [
         ManifestFile(
-            step_hours=int(f["step_hours"]),
+            step_hours=(None if kind == "s2s" and f.get("step_hours") is None
+                        else int(f["step_hours"])),
             path=Path(f["path"]),
             size_bytes=int(f["size_bytes"]),
             sha256=str(f["sha256"]),
             records_selected=int(f.get("records_selected", 0)),
+            group=f.get("group"),
+            request=dict(f.get("request", {})),
         )
         for f in raw.get("files", [])
     ]
-    files.sort(key=lambda f: f.step_hours)
+    files.sort(key=lambda f: f.step_hours if f.step_hours is not None else -1)
     return Manifest(
         schema_version=int(raw["schema_version"]),
-        source_name=str(raw["source"]["name"]),
+        source_name=source_name,
         init_time=str(raw["init_time"]),
         date=str(raw["date"]),
         cycle=int(raw["cycle"]),
@@ -90,6 +103,8 @@ def load_manifest(manifest_path: Path) -> Manifest:
         failures=list(raw.get("failures", [])),
         manifest_path=Path(manifest_path).resolve(),
         probability_availability=raw.get("probability_availability"),
+        kind=kind,
+        source_metadata=source,
     )
 
 

@@ -370,6 +370,16 @@ def main(argv: list[str] | None = None) -> int:
     p_index.add_argument("--log-level", default="INFO")
     p_index.set_defaults(func=lambda a: coverage_main(a.index_args))
 
+    from climate_restore.gefs_control import export_gefs_control
+    p_control = sub.add_parser("export-gefs-control", help="publish control member 0 from an existing GEFS member Zarr")
+    p_control.add_argument("--input", type=Path, required=True)
+    p_control.add_argument("--output-dir", type=Path, required=True)
+    p_control.add_argument("--log-level", default="INFO")
+    def control_command(args):
+        print(export_gefs_control(args.input, args.output_dir))
+        return 0
+    p_control.set_defaults(func=control_command)
+
     p_ls = sub.add_parser("list-sources", help="list registered source adapters")
     p_ls.add_argument("--log-level", default="INFO")
     p_ls.set_defaults(func=cmd_list_sources)

@@ -12,7 +12,7 @@ import numpy as np
 import xarray as xr
 from climate_restore.coverage_index import update_store
 from climate_restore.gefs_control import export_gefs_control
-from climate_restore.manifest import load_manifest, verify
+from climate_restore.manifest import load_manifest, ManifestHasFailures
 from climate_restore.processor import process_init, _verify_zarr_chunks
 from climate_restore.config import ZarrOptions
 from climate_restore.sources.gefs_s2s import GefsEnsAdapter, STEPS, ALL_FIELDS, INSTANT_FIELDS
@@ -22,9 +22,15 @@ def check_manifest(manifest, member_count):
     if manifest.source_name != 'gefs-ens' or manifest.cycle != 0: raise ValueError('wrong GEFS init/source')
     if manifest.source_metadata.get('members') != list(range(member_count)): raise ValueError('wrong member selection')
     if [f.step_hours for f in manifest.files] != list(STEPS): raise ValueError('35-day native steps are incomplete')
-    paths = verify(manifest, manifest.root_dir)
+    if not manifest.completed_at: raise ValueError('GEFS manifest is not complete')
+    if manifest.failures: raise ManifestHasFailures(manifest.manifest_path, manifest.failures)
+    # GEFS standard files are siblings of the manifest. An archived manifest
+    # retains its original absolute paths; never accidentally read the hot
+    # originals when validating or rebuilding from cold storage.
+    paths = [manifest.root_dir / entry.path.name for entry in manifest.files]
     for path, entry in zip(paths, manifest.files):
-        if path.stat().st_size != entry.size_bytes or hashlib.sha256(path.read_bytes()).hexdigest() != entry.sha256:
+        if (not path.is_file() or path.is_symlink() or path.stat().st_size != entry.size_bytes
+                or hashlib.sha256(path.read_bytes()).hexdigest() != entry.sha256):
             raise ValueError(f'raw checksum mismatch: {path.name}')
     return paths
 

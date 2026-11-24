@@ -188,3 +188,61 @@ docker exec -e OPENBLAS_NUM_THREADS=1 -e OMP_NUM_THREADS=1 -w /workspace/climate
 ```
 
 回滚只需移除这一段 crontab 和巡检入口；无需撤销索引或重启服务。入库的即时维护继续工作。
+
+## GEFS 原始数据 30 天转冷存
+
+GEFS 使用专用调度，避免通用冷存脚本在历史补齐期间仅凭单个 Zarr 标志搬走未切片的原始文件。
+按 UTC 起报日期判断 `date < today_utc - 30 days`，且对应实时/历史队列回执必须为
+`complete`、成员数一致、具有完成时间。历史回补的未完成日期即使早于 30 天，也保留在热端。
+
+每次迁移在下载、切片共用的 `gefs.lock` 下执行：
+
+1. 容器内只读校验标准 manifest、完整 181 个原生时效、成员数、15 个变量与每步记录数，
+   逐文件哈希，并检查 `gefs-ens` 和 `gefs-ctrl` 与原始清单的来源关联。
+   两个产品均全场读取、缺测/统计窗口正确，控制值与 c00 完全一致才开始复制。
+2. 宿主机使用容器 tar 输出复制整个原始日期（含隐藏成员缓存、manifest 与状态文件）
+   至冷盘隐藏暂存目录。校验路径及文件 SHA-256、同步至磁盘后，原子发布冷盘日期目录。
+   容器 `/save_data` 保持只读，不改原始文件权限。
+3. 容器重新核对实际冷热文件、Zarr 和挂载设备/目录身份后，才把热端日期原子移入清理目录并删除。
+   复制失败、中途超时或副本冲突保留原始数据；有效的暂存副本、已发布冷副本和未清理完的
+   热端清理目录均可继续处理。两个 Zarr 始终保留在热盘。
+
+安装时固定版本中的 `climate_restorage/deploy/` 需要
+`gefs_archive.py`、`gefs_archive_io.py` 和更新后的 `gefs_publish.py`；
+在宿主机 operation 目录安装 `gefs_coldmove.py` 和 `gefs_archive_io.py`。
+下载项目的实时和历史 `gefs_run.py` 应同步更新，支持冷盘重切且不重复下载。
+在现有 `gefs.json` 中合并：
+
+```json
+{
+  "host_data_root": "/training_data/climate_data",
+  "host_cold_root": "/save_data/climate_data",
+  "cold_data_root": "/save_data/climate_data"
+}
+```
+
+先验证安装、两个冷热路径的实际挂载及巡检兼容，再启用以下独立 crontab：
+
+```cron
+5,35 * * * * /usr/bin/python3 /home/zhangmingyu/operation/gefs_coldmove.py --live-config /home/zhangmingyu/operation/gefs.json --history-config /home/zhangmingyu/operation/releases/gefs-history-20261109/history.json >> /home/zhangmingyu/operation/logs/gefs-coldmove.log 2>&1
+```
+
+实时 :00/:30、回补 :10/:40 原调度保持不变。冷存使用 05–09、35–39 分空档，
+锁被占用则跳过，单窗口最多完成一个日期；超时可在后续窗口续跑。
+上述宿主机命令可加 `--dry-run` 在空档只列出候选，不复制与删除。
+
+每日回补巡检在容器内运行以下只读入口，范围及成员数从实际 history.json / gefs.json 取得：
+
+```sh
+.venv/bin/python deploy/gefs_archive.py audit \
+  --hot-root /climate_data --cold-root /save_data/climate_data \
+  --zarr-root /climate_data/climate_data_storage/zarr \
+  --start 20260601 --end 20261104 --member-count 5
+```
+
+它在冷热根目录查找 manifest、校验对应两个产品并输出每批 `raw_storage`；
+正常迁移的日期不会被判为缺失。新增完成日期仍需通过正式 API 实际读取。
+Watcher 已扫描这两个原始根目录，冷存后 Zarr 查询路径和覆盖索引无需迁移。
+
+回滚时先移除 GEFS 专用冷存 cron，等待正在运行的有界窗口结束；保留已迁移的冷端数据、
+冷端读取配置及冷热巡检入口。不要通过重新下载或未经核验的逆向移动完成回滚。

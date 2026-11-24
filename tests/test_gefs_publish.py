@@ -32,3 +32,23 @@ def test_failed_validation_never_publishes(tmp_path,monkeypatch):
  with pytest.raises(ValueError,match='bad field'):m.publish(p,out,5)
  assert not list(out.rglob('.zmetadata'))
  assert not list(tmp_path.glob('.gefs-stage-*'))
+
+
+def test_archive_manifest_reads_its_own_files_when_original_absolute_path_exists(tmp_path):
+ import shutil
+ p,data=manifest(tmp_path)
+ cold=tmp_path/'cold';cold.mkdir()
+ archived=cold/'manifest.json';shutil.copy2(p,archived)
+ shutil.copy2(tmp_path/'sample.grib2',cold/'sample.grib2')
+ (tmp_path/'sample.grib2').write_bytes(b'GRIBlost')
+ resolved=m.check_manifest(load_manifest(archived),5)
+ assert set(resolved)=={cold/'sample.grib2'}
+
+
+def test_missing_archived_file_does_not_silently_read_hot_original(tmp_path):
+ import shutil
+ p,data=manifest(tmp_path)
+ cold=tmp_path/'cold';cold.mkdir()
+ archived=cold/'manifest.json';shutil.copy2(p,archived)
+ with pytest.raises((OSError,ValueError)):
+  m.check_manifest(load_manifest(archived),5)

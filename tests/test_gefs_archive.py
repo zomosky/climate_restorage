@@ -226,7 +226,8 @@ def test_complete_hidden_stage_is_resumed_without_copying_raw_again(case, monkey
     assert not hot.exists() and cold.exists() and not stage.exists()
 
 
-def test_container_tar_stream_keeps_hidden_files_and_manifest_mtime(case, tmp_path, monkeypatch):
+@pytest.mark.parametrize("partial", [False, True])
+def test_container_tar_stream_keeps_hidden_files_and_manifest_mtime(case, tmp_path, monkeypatch, partial):
     from gefs_archive_io import stream_tar
     _, hot, _, _, _ = case
     binary=tmp_path/"bin"
@@ -240,9 +241,13 @@ def test_container_tar_stream_keeps_hidden_files_and_manifest_mtime(case, tmp_pa
     monkeypatch.setenv("PATH", f"{binary}{os.pathsep}{os.environ['PATH']}")
     target=tmp_path/"tar-copy"
     target.mkdir()
-    stream_tar("test-container", hot, target, 30)
-    assert files_in(target)==files_in(hot)
     name=f"00z/{DATE}_00z_gefs-ens.manifest.json"
+    selected=[name,"00z/.members/c00/f000.grib2"] if partial else None
+    stream_tar("test-container", hot, target, 30, paths=selected)
+    expected=files_in(hot)
+    if partial:
+        expected={k:expected[k] for k in selected}
+    assert files_in(target)==expected
     assert int((hot/name).stat().st_mtime)==int((target/name).stat().st_mtime)
 
 
@@ -305,6 +310,51 @@ def test_scheduler_skips_busy_shared_lock_and_never_runs_outside_window(tmp_path
     assert gefs_coldmove.tick(cfg, history, datetime(2026,11,24,6,10,tzinfo=timezone.utc), run=forbidden)["status"] == "yield"
 
 
+def test_cold_window_uses_idle_time_after_live_and_before_backfill():
+    import gefs_coldmove
+    def at(minute, second=0):
+        return datetime(2026,11,24,6,minute,second,tzinfo=timezone.utc)
+    assert gefs_coldmove.window_seconds(at(0,59))==0
+    assert gefs_coldmove.window_seconds(at(1))==480
+    assert gefs_coldmove.window_seconds(at(9))==0
+    assert gefs_coldmove.window_seconds(at(10))==0
+    assert gefs_coldmove.window_seconds(at(31))==480
+
+
+def test_partial_stage_restreams_only_unverified_files(case):
+    from gefs_archive_io import copy_to_cold, tree_hashes, tree_fingerprint
+    args, hot, cold, _, _ = case
+    expected=tree_hashes(hot)
+    stage=cold.parent/f".gefs-stage-{DATE}"
+    (stage/"00z").mkdir(parents=True)
+    correct="00z/f000.subset.grib2"
+    corrupt="00z/f003.subset.grib2"
+    shutil.copy2(hot/correct,stage/correct)
+    (stage/corrupt).write_bytes(b"truncated")
+    requested=[]
+    def populate(root, paths):
+        requested.extend(paths)
+        for name in paths:
+            dest=root/name
+            dest.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(hot/name,dest)
+    copy_to_cold(args["hot_root"],args["cold_root"],DATE,tree_fingerprint(expected),
+                 args["guard"],populate=populate,expected_files=expected)
+    assert correct not in requested and corrupt in requested
+    assert set(requested)==set(expected)-{correct}
+    assert files_in(cold)==files_in(hot) and hot.exists()
+
+
+def test_prepared_receipt_cannot_copy_after_product_or_manifest_changes(case):
+    args, hot, cold, _, ctrl = case
+    archive=module()
+    receipt=archive.check_archive_day(**args)
+    shutil.rmtree(ctrl)
+    with pytest.raises((ValueError,OSError,RuntimeError)):
+        archive.recheck_archive_day(**args,manifest_sha256=receipt["manifest_sha256"])
+    assert hot.exists() and not cold.exists()
+
+
 @pytest.mark.parametrize("copy_fails", [False, True])
 def test_scheduler_uses_container_to_read_and_retire_but_host_to_copy(case, tmp_path, monkeypatch, copy_fails):
     """The production cold bind is read-only; the host cannot read the raw GRIBs."""
@@ -325,30 +375,56 @@ def test_scheduler_uses_container_to_read_and_retire_but_host_to_copy(case, tmp_
         live_config="/config", member_count=5)
     monkeypatch.setattr(gefs_coldmove, "mount_identity", lambda path: [2 if path == args["cold_root"] else 1, 1])
     phases = []
+    fail_once=copy_fails
+    elapsed=0
     def transport(cmd, **kw):
+        nonlocal fail_once, elapsed
         if cmd[0] == "docker":
-            phase = next((x for x in ("check", "retire") if x in cmd), None)
+            phase = next((x for x in ("check", "recheck", "retire") if x in cmd), None)
             assert phase is not None, "read-only container must not copy to cold"
             phases.append(phase)
             if phase == "check":
                 result = module().check_archive_day(**args)
+                # The real server exhausted almost its whole available
+                # window here; the next window must reuse this receipt.
+                elapsed=470
                 return SimpleNamespace(returncode=0, stdout=json.dumps(result), stderr="")
+            if phase == "recheck":
+                result=module().recheck_archive_day(**args,manifest_sha256=cmd[cmd.index("--manifest-sha256")+1])
+                return SimpleNamespace(returncode=0,stdout=json.dumps(result),stderr="")
             result = module().retire_day(**args, tree_sha256=cmd[cmd.index("--tree-sha256")+1])
             return SimpleNamespace(returncode=0, stdout=json.dumps(result), stderr="")
         assert "gefs_archive_io.py" in " ".join(cmd) and "copy" in cmd and "--container" in cmd
         phases.append("copy")
-        if copy_fails:
+        if fail_once:
+            fail_once=False
             return SimpleNamespace(returncode=1)
         from gefs_archive_io import copy_to_cold
+        checkpoint=json.loads(Path(cmd[cmd.index("--checkpoint")+1]).read_text())
+        def populate(stage,paths):
+            for name in paths:
+                dest=stage/name;dest.parent.mkdir(parents=True,exist_ok=True)
+                shutil.copy2(hot/name,dest)
         copy_to_cold(args["hot_root"], args["cold_root"], DATE,
                      cmd[cmd.index("--tree-sha256")+1], args["guard"],
-                     populate=lambda stage: shutil.copytree(hot, stage, dirs_exist_ok=True))
+                     populate=populate,expected_files=checkpoint["file_hashes"])
         return SimpleNamespace(returncode=0)
-    result = gefs_coldmove.tick(live, history, datetime(2026,11,24,6,5,tzinfo=timezone.utc),
-                                run=transport, monotonic=lambda: 0)
+    def tick(hour,minute):
+        nonlocal elapsed
+        elapsed=0
+        return gefs_coldmove.tick(live,history,datetime(2026,11,24,hour,minute,tzinfo=timezone.utc),
+                                  run=transport,monotonic=lambda:elapsed)
+    assert tick(6,1)["status"]=="prepared"
+    assert phases==["check"] and hot.exists() and not cold.exists()
+    result=tick(6,31)
     if copy_fails:
-        assert phases == ["check", "copy"]
+        assert phases == ["check", "recheck", "copy"]
         assert result["status"] == "deferred" and hot.exists() and not cold.exists()
+        assert tick(7,1)["status"]=="copied"
+        assert tick(7,31)["status"]=="archived"
+        assert phases==["check","recheck","copy","recheck","copy","retire"]
     else:
-        assert phases == ["check", "copy", "retire"]
-        assert result["status"] == "archived" and cold.exists() and not hot.exists()
+        assert result["status"]=="copied" and hot.exists() and cold.exists()
+        assert tick(7,1)["status"]=="archived"
+        assert phases==["check","recheck","copy","retire"]
+    assert cold.exists() and not hot.exists()

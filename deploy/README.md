@@ -195,14 +195,16 @@ GEFS 使用专用调度，避免通用冷存脚本在历史补齐期间仅凭单
 按 UTC 起报日期判断 `date < today_utc - 30 days`，且对应实时/历史队列回执必须为
 `complete`、成员数一致、具有完成时间。历史回补的未完成日期即使早于 30 天，也保留在热端。
 
-每次迁移在下载、切片共用的 `gefs.lock` 下执行：
+每次迁移分三个空档，在下载、切片共用的 `gefs.lock` 下执行，并原子保存独立冷存阶段回执：
 
 1. 容器内只读校验标准 manifest、完整 181 个原生时效、成员数、15 个变量与每步记录数，
    逐文件哈希，并检查 `gefs-ens` 和 `gefs-ctrl` 与原始清单的来源关联。
-   两个产品均全场读取、缺测/统计窗口正确，控制值与 c00 完全一致才开始复制。
-2. 宿主机使用容器 tar 输出复制整个原始日期（含隐藏成员缓存、manifest 与状态文件）
+   两个产品均全场读取、缺测/统计窗口正确，控制值与 c00 完全一致才记录准备阶段。
+2. 后续空档重新全量验证两个切片产品及 manifest 的来源关联。宿主机使用容器 tar 输出
+   复制整个原始日期（含隐藏成员缓存、manifest 与状态文件）
    至冷盘隐藏暂存目录。校验路径及文件 SHA-256、同步至磁盘后，原子发布冷盘日期目录。
-   容器 `/save_data` 保持只读，不改原始文件权限。
+   中断后逐文件核验暂存内容，仅补未通过 SHA 或缺失的文件。
+   容器 `/save_data` 保持只读，不改原始文件权限。完成复制后记录下一阶段，热原料仍保留。
 3. 容器重新核对实际冷热文件、Zarr 和挂载设备/目录身份后，才把热端日期原子移入清理目录并删除。
    复制失败、中途超时或副本冲突保留原始数据；有效的暂存副本、已发布冷副本和未清理完的
    热端清理目录均可继续处理。两个 Zarr 始终保留在热盘。
@@ -224,11 +226,14 @@ GEFS 使用专用调度，避免通用冷存脚本在历史补齐期间仅凭单
 先验证安装、两个冷热路径的实际挂载及巡检兼容，再启用以下独立 crontab：
 
 ```cron
-5,35 * * * * /usr/bin/python3 /home/zhangmingyu/operation/gefs_coldmove.py --live-config /home/zhangmingyu/operation/gefs.json --history-config /home/zhangmingyu/operation/releases/gefs-history-20261109/history.json >> /home/zhangmingyu/operation/logs/gefs-coldmove.log 2>&1
+1,31 * * * * /usr/bin/python3 /home/zhangmingyu/operation/gefs_coldmove.py --live-config /home/zhangmingyu/operation/gefs.json --history-config /home/zhangmingyu/operation/releases/gefs-history-20261109/history.json >> /home/zhangmingyu/operation/logs/gefs-coldmove.log 2>&1
 ```
 
-实时 :00/:30、回补 :10/:40 原调度保持不变。冷存使用 05–09、35–39 分空档，
-锁被占用则跳过，单窗口最多完成一个日期；超时可在后续窗口续跑。
+实时 :00/:30、回补 :10/:40 原调度保持不变。冷存使用 01–09、31–39 分空档，
+锁被占用则跳过，并提前至少一分钟让行给下一次回补。每个空档最多完成当前日期的一个阶段，
+准备、复制、退役分轮执行。阶段回执保存在实时 state 文件同目录的
+`gefs-coldmove-checkpoint.json`（可通过 `coldmove_checkpoint` 配置覆盖），
+与原始回补状态独立；优先续跑已有回执日期。超时不会让已验证的前一阶段丢失。
 上述宿主机命令可加 `--dry-run` 在空档只列出候选，不复制与删除。
 
 每日回补巡检在容器内运行以下只读入口，范围及成员数从实际 history.json / gefs.json 取得：

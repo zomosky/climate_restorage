@@ -166,9 +166,25 @@ def check_archive_day(*, hot_root, cold_root, zarr_root, date, member_count, rec
     # before retirement. Skip another copy and recheck both trees at retirement.
     day = cold if cold.exists() else hot
     hashes = tree_hashes(day)
-    verify_day(day, zarr_root, date, member_count, raw_hashes=hashes, eager=True)
+    verified = verify_day(day, zarr_root, date, member_count, raw_hashes=hashes, eager=True)
     return dict(date=date, status="ready", raw_storage="hot" if day == hot else "cold",
-                tree_sha256=tree_fingerprint(hashes), files=len(hashes))
+                tree_sha256=tree_fingerprint(hashes), files=len(hashes),
+                manifest_sha256=verified["manifest_sha256"], file_hashes=hashes)
+
+
+def recheck_archive_day(*, hot_root, cold_root, zarr_root, date, member_count, record, cutoff, guard, manifest_sha256):
+    """Revalidate slicing/provenance before a later copy window.
+
+    All copied bytes must still match the previously verified raw tree.
+    Retirement independently rehashes both trees before removing the hot one.
+    """
+    hot, cold, _ = eligible_paths(hot_root, cold_root, zarr_root, date, member_count, record, cutoff, guard)
+    day = cold if cold.exists() else hot
+    verified = verify_day(day, zarr_root, date, member_count, eager=True)
+    if verified["manifest_sha256"] != manifest_sha256:
+        raise ValueError("GEFS manifest changed after preparation")
+    return dict(date=date, status="ready", raw_storage="hot" if day == hot else "cold",
+                manifest_sha256=manifest_sha256)
 
 
 def retire_day(*, hot_root, cold_root, zarr_root, date, member_count, record, cutoff, guard, tree_sha256):
@@ -264,7 +280,7 @@ def audit_range(*, hot_root, cold_root, zarr_root, start, end, member_count):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
-    for mode in ("audit", "check", "retire"):
+    for mode in ("audit", "check", "recheck", "retire"):
         command = sub.add_parser(mode)
         for root in ("hot", "cold", "zarr"):
             command.add_argument(f"--{root}-root", required=True, type=Path)
@@ -279,6 +295,8 @@ def main(argv=None):
             command.add_argument("--mounts", required=True, type=json.loads)
             if mode == "retire":
                 command.add_argument("--tree-sha256", required=True)
+            elif mode == "recheck":
+                command.add_argument("--manifest-sha256", required=True)
     args = vars(parser.parse_args(argv))
     mode = args.pop("mode")
     try:
@@ -286,7 +304,7 @@ def main(argv=None):
             result = audit_range(**args)
         else:
             mounts = args.pop("mounts")
-            operation = check_archive_day if mode == "check" else retire_day
+            operation = {"check": check_archive_day, "recheck": recheck_archive_day, "retire": retire_day}[mode]
             result = operation(**args, guard=lambda: check_mounts(
                 args["hot_root"], args["cold_root"], args["zarr_root"], mounts))
     except Exception as exc:

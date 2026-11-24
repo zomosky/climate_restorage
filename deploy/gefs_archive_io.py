@@ -12,7 +12,8 @@ from datetime import datetime
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import shutil
 import stat
 import subprocess
@@ -54,23 +55,70 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def tree_hashes(root):
+def tree_files(root):
     require_directory(root)
     device = root.stat().st_dev
-    hashes = {}
+    files = {}
     for path in sorted(root.rglob("*")):
         info = path.lstat()
         if info.st_dev != device or stat.S_ISLNK(info.st_mode):
             raise ValueError(f"symlink or another device inside GEFS tree: {path}")
         if stat.S_ISREG(info.st_mode):
-            hashes[str(path.relative_to(root))] = sha256(path)
+            files[path.relative_to(root).as_posix()] = path
         elif not stat.S_ISDIR(info.st_mode):
             raise ValueError(f"unexpected file type inside GEFS tree: {path}")
-    return hashes
+    return files
+
+
+def tree_hashes(root):
+    return {name: sha256(path) for name, path in tree_files(root).items()}
 
 
 def tree_fingerprint(hashes):
     return hashlib.sha256(json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def validate_file_hashes(hashes, expected):
+    if not isinstance(hashes, dict) or not hashes:
+        raise ValueError("empty GEFS prepared raw tree")
+    for name, digest in hashes.items():
+        path = PurePosixPath(name)
+        if (path.is_absolute() or ".." in path.parts or path.as_posix() != name
+                or name == "." or "\x00" in name or not re.fullmatch("[0-9a-f]{64}", digest)):
+            raise ValueError("invalid GEFS prepared file record")
+    if tree_fingerprint(hashes) != expected:
+        raise ValueError("GEFS prepared tree checksum differs")
+
+
+def revision(path):
+    info = path.stat()
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def resume_stage(stage, expected, populate):
+    """Retry only files missing from the hidden stage or failing their SHA."""
+    stage.mkdir(exist_ok=True)
+    files = tree_files(stage)
+    if set(files) - set(expected):
+        raise ValueError("unexpected files in GEFS cold staging directory")
+    matched = {}
+    for name, path in files.items():
+        before = revision(path)
+        digest = sha256(path)
+        after = revision(path)
+        if before == after and digest == expected[name]:
+            matched[name] = after
+    missing = sorted(set(expected) - set(matched))
+    if missing:
+        populate(stage, missing)
+    files = tree_files(stage)
+    if set(files) != set(expected):
+        raise ValueError("GEFS cold copy file list mismatch")
+    for name, path in files.items():
+        if matched.get(name) == revision(path):
+            continue
+        if sha256(path) != expected[name]:
+            raise ValueError(f"GEFS cold copy checksum mismatch: {name}")
 
 
 def fsync_path(path):
@@ -89,8 +137,10 @@ def sync_tree(root):
         fsync_path(path)
 
 
-def copy_to_cold(hot_root, cold_root, date, expected, guard, *, populate):
+def copy_to_cold(hot_root, cold_root, date, expected, guard, *, populate, expected_files=None):
     parse_day(date)
+    if expected_files is not None:
+        validate_file_hashes(expected_files, expected)
     guard()
     hot = hot_root / SOURCE / date
     require_directory(hot)
@@ -113,15 +163,18 @@ def copy_to_cold(hot_root, cold_root, date, expected, guard, *, populate):
         return
     # Interrupted staging is not a visible archive and may be retried while
     # the verified hot original is still present.
-    if stage.exists():
-        require_directory(stage)
-        if tree_fingerprint(tree_hashes(stage)) != expected:
-            shutil.rmtree(stage)
-    if not stage.exists():
-        stage.mkdir()
-        populate(stage)
-        if tree_fingerprint(tree_hashes(stage)) != expected:
-            raise ValueError("GEFS cold copy checksum or file list mismatch")
+    if expected_files is not None:
+        resume_stage(stage, expected_files, populate)
+    else:
+        if stage.exists():
+            require_directory(stage)
+            if tree_fingerprint(tree_hashes(stage)) != expected:
+                shutil.rmtree(stage)
+        if not stage.exists():
+            stage.mkdir()
+            populate(stage)
+            if tree_fingerprint(tree_hashes(stage)) != expected:
+                raise ValueError("GEFS cold copy checksum or file list mismatch")
     sync_tree(stage)
     guard()
     if cold.exists():
@@ -130,9 +183,10 @@ def copy_to_cold(hot_root, cold_root, date, expected, guard, *, populate):
     fsync_path(parent)
 
 
-def stream_tar(container, container_day, stage, seconds):
+def stream_tar(container, container_day, stage, seconds, paths=None):
+    inputs = ["."] if paths is None else ["--", *paths]
     command = ["docker", "exec", container, "timeout", "--signal=TERM", "--kill-after=5s",
-               f"{seconds}s", "tar", "-C", str(container_day), "-cf", "-", "."]
+               f"{seconds}s", "tar", "-C", str(container_day), "-cf", "-", *inputs]
     with subprocess.Popen(command, stdout=subprocess.PIPE) as producer:
         try:
             copied = subprocess.run(["tar", "--no-same-owner", "--no-same-permissions",
@@ -150,6 +204,7 @@ def main(argv=None):
         parser.add_argument(f"--{name}-root", type=Path, required=True)
     parser.add_argument("--date", required=True)
     parser.add_argument("--tree-sha256", required=True)
+    parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--mounts", type=json.loads, required=True)
     parser.add_argument("--container", required=True)
     parser.add_argument("--container-data-root", type=Path, required=True)
@@ -159,9 +214,18 @@ def main(argv=None):
         if args.tar_timeout <= 0 or not args.container_data_root.is_absolute():
             raise ValueError("invalid GEFS tar configuration")
         guard = lambda: check_mounts(args.hot_root, args.cold_root, args.zarr_root, args.mounts)
+        expected_files = None
+        if args.checkpoint is not None:
+            checkpoint = json.loads(args.checkpoint.read_text())
+            if (checkpoint.get("date") != args.date or checkpoint.get("phase") != "prepared"
+                    or checkpoint.get("tree_sha256") != args.tree_sha256):
+                raise ValueError("GEFS copy checkpoint differs")
+            expected_files = checkpoint["file_hashes"]
+        def populate(stage, paths=None):
+            stream_tar(args.container, args.container_data_root / SOURCE / args.date,
+                       stage, args.tar_timeout, paths)
         copy_to_cold(args.hot_root, args.cold_root, args.date, args.tree_sha256, guard,
-                     populate=lambda stage: stream_tar(args.container,
-                         args.container_data_root / SOURCE / args.date, stage, args.tar_timeout))
+                     populate=populate, expected_files=expected_files)
     except Exception as exc:
         print(json.dumps(dict(status="blocked", error=f"{type(exc).__name__}: {exc}")), file=sys.stderr, flush=True)
         return 1

@@ -14,7 +14,7 @@ import sys
 import time
 import re
 
-from gefs_archive_io import directory_identity as mount_identity, fsync_path, validate_file_hashes
+from gefs_archive_io import directory_identity as mount_identity, fsync_path, parse_day, validate_file_hashes
 
 
 def window_seconds(now):
@@ -59,32 +59,48 @@ def verification_receipt(result, date, *, full):
     return ready
 
 
-def candidate_dates(live, history, hot_root, cutoff):
-    """Only successful scheduler receipts are eligible; age alone is insufficient."""
+def in_archive_range(date, archive_range):
+    return archive_range is not None and archive_range[0] <= date <= archive_range[1]
+
+
+def candidate_dates(live, history, hot_root, cutoff, *, archive_range=None):
+    """Select completed dates, giving the explicitly requested dates priority."""
     if history["history_end"] >= live["start_date"]:
         raise ValueError("GEFS history and realtime overlap")
     if history["live_config"] != live.get("_config_path", history["live_config"]):
         raise ValueError("GEFS history uses a different realtime config")
     candidates = []
+    live_end = cutoff if archive_range is None else max(cutoff, archive_range[1])
     groups = [(history, history["history_start"], history["history_end"]),
-              (live, live["start_date"], cutoff)]
+              (live, live["start_date"], live_end)]
     for cfg, start, end in groups:
         state_path = Path(cfg["state_file"])
         if not state_path.is_file():
             continue
         members = cfg.get("member_count", live.get("member_count", 5))
         for date, record in read_config(state_path).get("dates", {}).items():
-            if (len(date) != 8 or not date.isdigit() or not start <= date <= end or date >= cutoff
+            if (len(date) != 8 or not date.isdigit() or not start <= date <= end
+                    or (date >= cutoff and not in_archive_range(date, archive_range))
                     or record.get("status") != "complete" or record.get("member_count") != members
                     or not record.get("completed_at")):
                 continue
             raw = hot_root / "gefs-ens"
             if (raw / date).is_dir() or (raw / f".gefs-retired-{date}").is_dir():
                 candidates.append((date, members, record))
-    return sorted(candidates, key=lambda item: item[0])
+    return sorted(candidates, key=lambda item: (not in_archive_range(item[0], archive_range), item[0]))
 
 
-def tick(live, history, now, *, run=subprocess.run, monotonic=time.monotonic, dry_run=False):
+def tick(live, history, now, *, run=subprocess.run, monotonic=time.monotonic, dry_run=False, archive_range=None):
+    today = now.astimezone(timezone.utc).date()
+    cutoff = (today - timedelta(days=30)).strftime("%Y%m%d")
+    range_cutoff = cutoff
+    if archive_range is not None:
+        start, end = (parse_day(stamp).date() for stamp in archive_range)
+        if start > end or end > today:
+            raise ValueError("GEFS archive range must be ordered and end by today UTC")
+        # The worker's cutoff is exclusive. Use the extra eligibility only
+        # for dates inside this invocation's explicitly requested range.
+        range_cutoff = max(cutoff, (end + timedelta(days=1)).strftime("%Y%m%d"))
     budget = window_seconds(now)
     if budget < 60:
         return {"status": "yield"}
@@ -101,8 +117,7 @@ def tick(live, history, now, *, run=subprocess.run, monotonic=time.monotonic, dr
                   "zarr": mount_identity(zarr_host)}
         if mounts["hot"][0] == mounts["cold"][0] or not zarr_host.is_relative_to(hot_host):
             raise ValueError("GEFS archive requires a separate cold device and hot Zarr")
-        cutoff = (now.astimezone(timezone.utc).date() - timedelta(days=30)).strftime("%Y%m%d")
-        candidates = candidate_dates(live, history, hot_host, cutoff)
+        candidates = candidate_dates(live, history, hot_host, cutoff, archive_range=archive_range)
         checkpoint_path = Path(live.get("coldmove_checkpoint", Path(live["state_file"]).parent / "gefs-coldmove-checkpoint.json"))
         checkpoint = read_config(checkpoint_path) if checkpoint_path.is_file() else None
         if checkpoint is not None:
@@ -132,9 +147,10 @@ def tick(live, history, now, *, run=subprocess.run, monotonic=time.monotonic, dr
             remaining = int(deadline - monotonic())
             if remaining < 60:
                 break
+            effective_cutoff = range_cutoff if in_archive_range(date, archive_range) else cutoff
             common = ["--hot-root", live["data_root"], "--cold-root", live["cold_data_root"],
                       "--zarr-root", live["zarr_root"], "--date", date, "--member-count", str(members),
-                      "--cutoff", cutoff, "--record", json.dumps(record), "--mounts", json.dumps(mounts)]
+                      "--cutoff", effective_cutoff, "--record", json.dumps(record), "--mounts", json.dumps(mounts)]
             def worker(phase, seconds, extra=()):
                 return ["docker", "exec", "-w", restorage, container,
                         "timeout", "--signal=TERM", "--kill-after=10s", f"{seconds}s",
@@ -211,13 +227,16 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live-config", type=Path, required=True)
     parser.add_argument("--history-config", type=Path, required=True)
+    parser.add_argument("--archive-range", nargs=2, metavar=("START", "END"),
+                        help="Prioritize these inclusive YYYYMMDD dates and allow early archive once complete")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
         live = read_config(args.live_config)
         history = read_config(args.history_config)
         live["_config_path"] = str(args.live_config)
-        result = tick(live, history, datetime.now(timezone.utc), dry_run=args.dry_run)
+        result = tick(live, history, datetime.now(timezone.utc),
+                      dry_run=args.dry_run, archive_range=args.archive_range)
     except Exception as exc:
         print(json.dumps({"status": "blocked", "error": f"{type(exc).__name__}: {exc}"}), file=sys.stderr, flush=True)
         return 1

@@ -321,6 +321,90 @@ def test_cold_window_uses_idle_time_after_live_and_before_backfill():
     assert gefs_coldmove.window_seconds(at(31))==480
 
 
+def test_requested_archive_range_prioritizes_only_ready_dates(tmp_path):
+    import gefs_coldmove
+
+    history_dates = {stamp: RECORD for stamp in (
+        "20260617", "20260618", "20261025", "20261026", "20261104",
+    )}
+    live_dates = {
+        "20261115": RECORD,
+        "20261116": dict(RECORD, status="download"),
+        "20261117": dict(RECORD, completed_at=None),
+        "20261118": dict(RECORD, member_count=3),
+        "20261119": RECORD,  # Already cold, no hot directory.
+        "20261120": RECORD,
+        "20261121": RECORD,
+    }
+    history_state = tmp_path / "history.json"
+    live_state = tmp_path / "live.json"
+    history_state.write_text(json.dumps({"dates": history_dates}))
+    live_state.write_text(json.dumps({"dates": live_dates}))
+    for stamp in (*history_dates, *live_dates):
+        if stamp != "20261119":
+            (tmp_path / "gefs-ens" / stamp).mkdir(parents=True)
+
+    live = dict(state_file=str(live_state), start_date="20261105", member_count=5)
+    history = dict(state_file=str(history_state), history_start="20260601", history_end="20261104",
+                   live_config="/config", member_count=5)
+    regular = gefs_coldmove.candidate_dates(live, history, tmp_path, "20261026")
+    assert [stamp for stamp, _, _ in regular] == ["20260617", "20260618", "20261025"]
+
+    requested = gefs_coldmove.candidate_dates(live, history, tmp_path, "20261026",
+                                             archive_range=("20260618", "20261120"))
+    assert [stamp for stamp, _, _ in requested] == [
+        "20260618", "20261025", "20261026", "20261104", "20261115", "20261120", "20260617"
+    ]
+
+
+@pytest.mark.parametrize("archive_range", [
+    ("20261121", "20261120"),
+    ("20260618", "20261126"),
+    ("20260230", "20261125"),
+])
+def test_invalid_archive_range_stops_before_storage_access(archive_range):
+    import gefs_coldmove
+
+    with pytest.raises(ValueError):
+        gefs_coldmove.tick({}, {}, datetime(2026, 11, 25, 6, 1, tzinfo=timezone.utc),
+                          archive_range=archive_range)
+
+
+def test_requested_range_keeps_existing_checkpoint_first(tmp_path, monkeypatch):
+    import gefs_coldmove
+    from gefs_archive_io import tree_fingerprint
+
+    hot = tmp_path / "hot"
+    cold = tmp_path / "cold"
+    zarr = hot / "zarr"
+    zarr.mkdir(parents=True)
+    cold.mkdir()
+    recent = "20261124"
+    for stamp in (DATE, recent):
+        (hot / "gefs-ens" / stamp).mkdir(parents=True)
+
+    live_state = tmp_path / "live.json"
+    history_state = tmp_path / "history.json"
+    live_state.write_text(json.dumps({"dates": {recent: RECORD}}))
+    history_state.write_text(json.dumps({"dates": {DATE: RECORD}}))
+    live = dict(lock_file=str(tmp_path / "gefs.lock"), host_data_root=str(hot),
+                host_cold_root=str(cold), host_zarr_root=str(zarr),
+                start_date="20261105", state_file=str(live_state), member_count=5)
+    history = dict(state_file=str(history_state), history_start="20260601",
+                   history_end="20261104", live_config="/config", member_count=5)
+    monkeypatch.setattr(gefs_coldmove, "mount_identity", lambda path: [2 if path == cold else 1, 1])
+    hashes = {"00z/f000.subset.grib2": "a" * 64}
+    checkpoint = tmp_path / "gefs-coldmove-checkpoint.json"
+    saved = dict(RECORD, date=DATE, phase="prepared", file_hashes=hashes, tree_sha256=tree_fingerprint(hashes))
+    checkpoint.write_text(json.dumps(saved))
+
+    plan = gefs_coldmove.tick(live, history, datetime(2026, 11, 25, 6, 1, tzinfo=timezone.utc),
+                              archive_range=("20261120", "20261125"), dry_run=True)
+    assert plan["candidates"] == [DATE, recent]
+    assert plan["checkpoint_phase"] == "prepared"
+    assert json.loads(checkpoint.read_text()) == saved
+
+
 def test_partial_stage_restreams_only_unverified_files(case):
     from gefs_archive_io import copy_to_cold, tree_hashes, tree_fingerprint
     args, hot, cold, _, _ = case
@@ -355,8 +439,8 @@ def test_prepared_receipt_cannot_copy_after_product_or_manifest_changes(case):
     assert hot.exists() and not cold.exists()
 
 
-@pytest.mark.parametrize("copy_fails", [False, True])
-def test_scheduler_uses_container_to_read_and_retire_but_host_to_copy(case, tmp_path, monkeypatch, copy_fails):
+@pytest.mark.parametrize(("copy_fails", "recent"), [(False, False), (True, False), (False, True)])
+def test_scheduler_uses_container_to_read_and_retire_but_host_to_copy(case, tmp_path, monkeypatch, copy_fails, recent):
     """The production cold bind is read-only; the host cannot read the raw GRIBs."""
     from types import SimpleNamespace
     import gefs_coldmove
@@ -365,13 +449,18 @@ def test_scheduler_uses_container_to_read_and_retire_but_host_to_copy(case, tmp_
     nested_zarr.parent.mkdir()
     args["zarr_root"].rename(nested_zarr)
     args["zarr_root"]=nested_zarr
-    live_state = tmp_path/"live-state.json";live_state.write_text('{"dates": {}}')
-    history_state = tmp_path/"history-state.json";history_state.write_text(json.dumps({"dates": {DATE: RECORD}}))
+    record = dict(RECORD, completed_at="2026-06-22T05:52:05+00:00") if recent else RECORD
+    live_state = tmp_path / "live-state.json"
+    live_state.write_text(json.dumps({"dates": {DATE: record} if recent else {}}))
+    history_state = tmp_path / "history-state.json"
+    history_state.write_text(json.dumps({"dates": {} if recent else {DATE: record}}))
     live = dict(lock_file=str(tmp_path/"gefs.lock"), host_data_root=str(args["hot_root"]),
         host_cold_root=str(args["cold_root"]), host_zarr_root=str(args["zarr_root"]),
         data_root="/climate_data", cold_data_root="/save_data/climate_data", zarr_root="/climate_data/zarr",
-        release_root="/workspace/gefs-release", start_date="20261105", state_file=str(live_state), member_count=5)
-    history = dict(history_start="20260601", history_end="20261104", state_file=str(history_state),
+        release_root="/workspace/gefs-release", start_date=DATE if recent else "20261105",
+        state_file=str(live_state), member_count=5)
+    history = dict(history_start="20260601", history_end="20260620" if recent else "20261104",
+        state_file=str(history_state),
         live_config="/config", member_count=5)
     monkeypatch.setattr(gefs_coldmove, "mount_identity", lambda path: [2 if path == args["cold_root"] else 1, 1])
     phases = []
@@ -383,16 +472,19 @@ def test_scheduler_uses_container_to_read_and_retire_but_host_to_copy(case, tmp_
             phase = next((x for x in ("check", "recheck", "retire") if x in cmd), None)
             assert phase is not None, "read-only container must not copy to cold"
             phases.append(phase)
+            cutoff = cmd[cmd.index("--cutoff") + 1]
+            assert cutoff == ("20260622" if recent else "20261025")
+            worker_args = dict(args, cutoff=cutoff, record=json.loads(cmd[cmd.index("--record") + 1]))
             if phase == "check":
-                result = module().check_archive_day(**args)
+                result = module().check_archive_day(**worker_args)
                 # The real server exhausted almost its whole available
                 # window here; the next window must reuse this receipt.
                 elapsed=470
                 return SimpleNamespace(returncode=0, stdout=json.dumps(result), stderr="")
             if phase == "recheck":
-                result=module().recheck_archive_day(**args,manifest_sha256=cmd[cmd.index("--manifest-sha256")+1])
+                result=module().recheck_archive_day(**worker_args,manifest_sha256=cmd[cmd.index("--manifest-sha256")+1])
                 return SimpleNamespace(returncode=0,stdout=json.dumps(result),stderr="")
-            result = module().retire_day(**args, tree_sha256=cmd[cmd.index("--tree-sha256")+1])
+            result = module().retire_day(**worker_args, tree_sha256=cmd[cmd.index("--tree-sha256")+1])
             return SimpleNamespace(returncode=0, stdout=json.dumps(result), stderr="")
         assert "gefs_archive_io.py" in " ".join(cmd) and "copy" in cmd and "--container" in cmd
         phases.append("copy")
@@ -412,8 +504,10 @@ def test_scheduler_uses_container_to_read_and_retire_but_host_to_copy(case, tmp_
     def tick(hour,minute):
         nonlocal elapsed
         elapsed=0
-        return gefs_coldmove.tick(live,history,datetime(2026,11,24,hour,minute,tzinfo=timezone.utc),
-                                  run=transport,monotonic=lambda:elapsed)
+        month, day = (7, 1) if recent else (11, 24)
+        options = {"archive_range": (DATE, DATE)} if recent else {}
+        return gefs_coldmove.tick(live, history, datetime(2026, month, day, hour, minute, tzinfo=timezone.utc),
+                                  run=transport, monotonic=lambda: elapsed, **options)
     assert tick(6,1)["status"]=="prepared"
     assert phases==["check"] and hot.exists() and not cold.exists()
     result=tick(6,31)

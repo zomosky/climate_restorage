@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify GEFS products, archive raw files, and audit both storage tiers.
 
-Production moves are called only by the host scheduler holding the GEFS lock.
+The host scheduler holds the applicable GEFS lock during production moves.
 The cold date is published atomically before the hot date is retired.
 """
 from __future__ import annotations

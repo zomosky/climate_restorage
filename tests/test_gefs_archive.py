@@ -1,5 +1,6 @@
 """Full native GEFS dates may leave hot storage only after both products are verified."""
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import os
@@ -439,8 +440,12 @@ def test_prepared_receipt_cannot_copy_after_product_or_manifest_changes(case):
     assert hot.exists() and not cold.exists()
 
 
-@pytest.mark.parametrize(("copy_fails", "recent"), [(False, False), (True, False), (False, True)])
-def test_scheduler_uses_container_to_read_and_retire_but_host_to_copy(case, tmp_path, monkeypatch, copy_fails, recent):
+@pytest.mark.parametrize(("copy_fails", "recent", "parallel"), [
+    (False, False, False), (True, False, False), (False, True, False), (False, False, True),
+])
+def test_scheduler_uses_container_to_read_and_retire_but_host_to_copy(
+    case, tmp_path, monkeypatch, copy_fails, recent, parallel
+):
     """The production cold bind is read-only; the host cannot read the raw GRIBs."""
     from types import SimpleNamespace
     import gefs_coldmove
@@ -458,7 +463,7 @@ def test_scheduler_uses_container_to_read_and_retire_but_host_to_copy(case, tmp_
         host_cold_root=str(args["cold_root"]), host_zarr_root=str(args["zarr_root"]),
         data_root="/climate_data", cold_data_root="/save_data/climate_data", zarr_root="/climate_data/zarr",
         release_root="/workspace/gefs-release", start_date=DATE if recent else "20261105",
-        state_file=str(live_state), member_count=5)
+        state_file=str(live_state), member_count=5, parallel_coldmove=parallel)
     history = dict(history_start="20260601", history_end="20260620" if recent else "20261104",
         state_file=str(history_state),
         live_config="/config", member_count=5)
@@ -468,6 +473,10 @@ def test_scheduler_uses_container_to_read_and_retire_but_host_to_copy(case, tmp_
     elapsed=0
     def transport(cmd, **kw):
         nonlocal fail_once, elapsed
+        if parallel:
+            with (tmp_path / f"gefs.lock.{DATE}").open("a") as same_date:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(same_date, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if cmd[0] == "docker":
             phase = next((x for x in ("check", "recheck", "retire") if x in cmd), None)
             assert phase is not None, "read-only container must not copy to cold"
@@ -506,10 +515,37 @@ def test_scheduler_uses_container_to_read_and_retire_but_host_to_copy(case, tmp_
         elapsed=0
         month, day = (7, 1) if recent else (11, 24)
         options = {"archive_range": (DATE, DATE)} if recent else {}
+        if parallel:
+            # The June 7 producer holds both of its locks during another day's move.
+            with Path(live["lock_file"]).open("a") as producer, (tmp_path / "gefs.lock.20260607").open("a") as other_date:
+                fcntl.flock(producer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(other_date, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return gefs_coldmove.tick(live, history, datetime(2026, month, day, hour, 15, tzinfo=timezone.utc),
+                                          run=transport, monotonic=lambda: elapsed, **options)
         return gefs_coldmove.tick(live, history, datetime(2026, month, day, hour, minute, tzinfo=timezone.utc),
                                   run=transport, monotonic=lambda: elapsed, **options)
     assert tick(6,1)["status"]=="prepared"
     assert phases==["check"] and hot.exists() and not cold.exists()
+    if parallel:
+        with (tmp_path / f"gefs.lock.{DATE}").open("a") as same_date:
+            fcntl.flock(same_date, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert tick(6, 31)["status"] == "date_busy"
+        assert phases == ["check"] and hot.exists() and not cold.exists()
+
+        candidates = gefs_coldmove.candidate_dates
+        state_file = live_state if recent else history_state
+        state_before_retry = state_file.read_text()
+
+        def racing_producer(*args, **kwargs):
+            selected = candidates(*args, **kwargs)
+            state_file.write_text(json.dumps({"dates": {DATE: dict(record, status="publish")}}))
+            return selected
+
+        with monkeypatch.context() as patch:
+            patch.setattr(gefs_coldmove, "candidate_dates", racing_producer)
+            assert tick(6, 31)["status"] == "receipt_changed"
+        state_file.write_text(state_before_retry)
+        assert phases == ["check"] and hot.exists() and not cold.exists()
     result=tick(6,31)
     if copy_fails:
         assert phases == ["check", "recheck", "copy"]

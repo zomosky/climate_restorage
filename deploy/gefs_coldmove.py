@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Host-side GEFS cold storage scheduler, using the existing GEFS pipeline lock."""
+"""Host-side GEFS cold storage scheduler."""
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 import fcntl
 import json
@@ -15,6 +16,30 @@ import time
 import re
 
 from gefs_archive_io import directory_identity as mount_identity, fsync_path, parse_day, validate_file_hashes
+
+
+@contextmanager
+def claim_lock(path):
+    """Keep the host lock for the full operation, including worker exit."""
+    with Path(path).open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+        else:
+            yield True
+
+
+def coldmove_lock_path(pipeline_lock):
+    path = Path(pipeline_lock)
+    return path.with_name(f"{path.name}.coldmove")
+
+
+def date_lock_path(pipeline_lock, date):
+    # The realtime and historical hosts in download/deploy/gefs_run.py use
+    # the same lock_file and date suffix for a full download and publication.
+    path = Path(pipeline_lock)
+    return path.with_name(f"{path.name}.{date}")
 
 
 def window_seconds(now):
@@ -101,14 +126,15 @@ def tick(live, history, now, *, run=subprocess.run, monotonic=time.monotonic, dr
         # The worker's cutoff is exclusive. Use the extra eligibility only
         # for dates inside this invocation's explicitly requested range.
         range_cutoff = max(cutoff, (end + timedelta(days=1)).strftime("%Y%m%d"))
-    budget = window_seconds(now)
+    parallel = live.get("parallel_coldmove") is True
+    budget = 900 if parallel else window_seconds(now)
     if budget < 60:
         return {"status": "yield"}
     deadline = monotonic() + budget
-    with Path(live["lock_file"]).open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+    pipeline_lock = live["lock_file"]
+    scheduler_lock = coldmove_lock_path(pipeline_lock) if parallel else pipeline_lock
+    with claim_lock(scheduler_lock) as claimed:
+        if not claimed:
             return {"status": "busy"}
         zarr_host = Path(live["host_zarr_root"])
         hot_host = Path(live.get("host_data_root", zarr_host.parent.parent))
@@ -147,79 +173,88 @@ def tick(live, history, now, *, run=subprocess.run, monotonic=time.monotonic, dr
             remaining = int(deadline - monotonic())
             if remaining < 60:
                 break
-            effective_cutoff = range_cutoff if in_archive_range(date, archive_range) else cutoff
-            common = ["--hot-root", live["data_root"], "--cold-root", live["cold_data_root"],
-                      "--zarr-root", live["zarr_root"], "--date", date, "--member-count", str(members),
-                      "--cutoff", effective_cutoff, "--record", json.dumps(record), "--mounts", json.dumps(mounts)]
-            def worker(phase, seconds, extra=()):
-                return ["docker", "exec", "-w", restorage, container,
-                        "timeout", "--signal=TERM", "--kill-after=10s", f"{seconds}s",
-                        python, f"{release}/download/deploy/gefs_run.py", "--bounded-exec", "--",
-                        python, f"{restorage}/deploy/gefs_archive.py", phase, *common, *extra]
-            if checkpoint is None:
-                print(json.dumps({"status": "checking", "date": date, "budget_seconds": remaining}), flush=True)
-                result = run(worker("check", remaining), check=False, capture_output=True, text=True)
-                if result.returncode:
-                    if result.stderr:
-                        print(result.stderr, file=sys.stderr, flush=True)
-                    errors.append({"date": date, "phase": "check", "exit_code": result.returncode})
-                    if result.returncode in (124, 137):
-                        break
-                    continue
-                try:
-                    ready = verification_receipt(result, date, full=True)
-                except (ValueError, IndexError, KeyError, TypeError) as exc:
-                    errors.append({"date": date, "phase": "check", "error": str(exc)})
-                    continue
-                checkpoint = {**ready, "member_count": members, "completed_at": record["completed_at"],
-                              "phase": "prepared" if ready["raw_storage"] == "hot" else "copied"}
-                save_checkpoint(checkpoint_path, checkpoint)
-                # A successful full read is durable even if it takes the
-                # entire idle window. Do not start another expensive phase.
-                return {"status": checkpoint["phase"], "date": date, "blocked": errors}
-
-            digest = checkpoint["tree_sha256"]
-            if checkpoint["phase"] == "prepared":
-                print(json.dumps({"status": "copy_window", "date": date, "budget_seconds": remaining}), flush=True)
-                result = run(worker("recheck", remaining, ["--manifest-sha256", checkpoint["manifest_sha256"]]),
-                             check=False, capture_output=True, text=True)
-                if result.returncode:
-                    if result.stderr:
-                        print(result.stderr, file=sys.stderr, flush=True)
-                    if result.returncode not in (124, 137):
-                        save_checkpoint(checkpoint_path, None)
-                    errors.append({"date": date, "phase": "recheck", "exit_code": result.returncode})
-                    break
-                ready = verification_receipt(result, date, full=False)
-                if ready["manifest_sha256"] != checkpoint["manifest_sha256"]:
-                    save_checkpoint(checkpoint_path, None)
-                    raise ValueError("GEFS prepared manifest changed")
-                if ready["raw_storage"] == "hot":
-                    remaining = int(deadline - monotonic())
-                    if remaining < 40:
-                        break
-                    copy = ["timeout", "--signal=TERM", "--kill-after=5s", f"{remaining}s",
-                            sys.executable, str(Path(__file__).with_name("gefs_archive_io.py")), "copy",
-                            "--hot-root", str(hot_host), "--cold-root", str(cold_host),
-                            "--zarr-root", str(zarr_host), "--date", date, "--tree-sha256", digest,
-                            "--mounts", json.dumps(mounts), "--container", container,
-                            "--container-data-root", live["data_root"], "--tar-timeout", str(remaining-10),
-                            "--checkpoint", str(checkpoint_path)]
-                    result = run(copy, check=False)
+            date_scope = claim_lock(date_lock_path(pipeline_lock, date)) if parallel else nullcontext(True)
+            with date_scope as claimed:
+                if not claimed:
+                    return {"status": "date_busy", "date": date}
+                if parallel:
+                    state_path = history["state_file"] if date < live["start_date"] else live["state_file"]
+                    current = read_config(state_path).get("dates", {}).get(date)
+                    if current != record:
+                        return {"status": "receipt_changed", "date": date}
+                effective_cutoff = range_cutoff if in_archive_range(date, archive_range) else cutoff
+                common = ["--hot-root", live["data_root"], "--cold-root", live["cold_data_root"],
+                          "--zarr-root", live["zarr_root"], "--date", date, "--member-count", str(members),
+                          "--cutoff", effective_cutoff, "--record", json.dumps(record), "--mounts", json.dumps(mounts)]
+                def worker(phase, seconds, extra=()):
+                    return ["docker", "exec", "-w", restorage, container,
+                            "timeout", "--signal=TERM", "--kill-after=10s", f"{seconds}s",
+                            python, f"{release}/download/deploy/gefs_run.py", "--bounded-exec", "--",
+                            python, f"{restorage}/deploy/gefs_archive.py", phase, *common, *extra]
+                if checkpoint is None:
+                    print(json.dumps({"status": "checking", "date": date, "budget_seconds": remaining}), flush=True)
+                    result = run(worker("check", remaining), check=False, capture_output=True, text=True)
                     if result.returncode:
-                        errors.append({"date": date, "phase": "copy", "exit_code": result.returncode})
-                        break
-                checkpoint["phase"] = "copied"
-                save_checkpoint(checkpoint_path, checkpoint)
-                return {"status": "copied", "date": date, "blocked": errors}
+                        if result.stderr:
+                            print(result.stderr, file=sys.stderr, flush=True)
+                        errors.append({"date": date, "phase": "check", "exit_code": result.returncode})
+                        if result.returncode in (124, 137):
+                            break
+                        continue
+                    try:
+                        ready = verification_receipt(result, date, full=True)
+                    except (ValueError, IndexError, KeyError, TypeError) as exc:
+                        errors.append({"date": date, "phase": "check", "error": str(exc)})
+                        continue
+                    checkpoint = {**ready, "member_count": members, "completed_at": record["completed_at"],
+                                  "phase": "prepared" if ready["raw_storage"] == "hot" else "copied"}
+                    save_checkpoint(checkpoint_path, checkpoint)
+                    # A successful full read is durable even if it takes the
+                    # entire idle window. Do not start another expensive phase.
+                    return {"status": checkpoint["phase"], "date": date, "blocked": errors}
 
-            print(json.dumps({"status": "retire_window", "date": date, "budget_seconds": remaining}), flush=True)
-            result = run(worker("retire", remaining, ["--tree-sha256", digest]), check=False)
-            if result.returncode == 0:
-                save_checkpoint(checkpoint_path, None)
-                return {"status": "archived", "date": date, "candidates": len(candidates), "blocked": errors}
-            errors.append({"date": date, "phase": "retire", "exit_code": result.returncode})
-            break
+                digest = checkpoint["tree_sha256"]
+                if checkpoint["phase"] == "prepared":
+                    print(json.dumps({"status": "copy_window", "date": date, "budget_seconds": remaining}), flush=True)
+                    result = run(worker("recheck", remaining, ["--manifest-sha256", checkpoint["manifest_sha256"]]),
+                                 check=False, capture_output=True, text=True)
+                    if result.returncode:
+                        if result.stderr:
+                            print(result.stderr, file=sys.stderr, flush=True)
+                        if result.returncode not in (124, 137):
+                            save_checkpoint(checkpoint_path, None)
+                        errors.append({"date": date, "phase": "recheck", "exit_code": result.returncode})
+                        break
+                    ready = verification_receipt(result, date, full=False)
+                    if ready["manifest_sha256"] != checkpoint["manifest_sha256"]:
+                        save_checkpoint(checkpoint_path, None)
+                        raise ValueError("GEFS prepared manifest changed")
+                    if ready["raw_storage"] == "hot":
+                        remaining = int(deadline - monotonic())
+                        if remaining < 40:
+                            break
+                        copy = ["timeout", "--signal=TERM", "--kill-after=5s", f"{remaining}s",
+                                sys.executable, str(Path(__file__).with_name("gefs_archive_io.py")), "copy",
+                                "--hot-root", str(hot_host), "--cold-root", str(cold_host),
+                                "--zarr-root", str(zarr_host), "--date", date, "--tree-sha256", digest,
+                                "--mounts", json.dumps(mounts), "--container", container,
+                                "--container-data-root", live["data_root"], "--tar-timeout", str(remaining-10),
+                                "--checkpoint", str(checkpoint_path)]
+                        result = run(copy, check=False)
+                        if result.returncode:
+                            errors.append({"date": date, "phase": "copy", "exit_code": result.returncode})
+                            break
+                    checkpoint["phase"] = "copied"
+                    save_checkpoint(checkpoint_path, checkpoint)
+                    return {"status": "copied", "date": date, "blocked": errors}
+
+                print(json.dumps({"status": "retire_window", "date": date, "budget_seconds": remaining}), flush=True)
+                result = run(worker("retire", remaining, ["--tree-sha256", digest]), check=False)
+                if result.returncode == 0:
+                    save_checkpoint(checkpoint_path, None)
+                    return {"status": "archived", "date": date, "candidates": len(candidates), "blocked": errors}
+                errors.append({"date": date, "phase": "retire", "exit_code": result.returncode})
+                break
         return {"status": "deferred", "blocked": errors, "candidates": len(candidates)}
 
 

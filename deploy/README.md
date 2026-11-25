@@ -229,12 +229,21 @@ GEFS 使用专用调度，避免通用冷存脚本在历史补齐期间仅凭单
 1,31 * * * * /usr/bin/python3 /home/zhangmingyu/operation/gefs_coldmove.py --live-config /home/zhangmingyu/operation/gefs.json --history-config /home/zhangmingyu/operation/releases/gefs-history-20261109/history.json >> /home/zhangmingyu/operation/logs/gefs-coldmove.log 2>&1
 ```
 
-实时 :00/:30、回补 :10/:40 原调度保持不变。冷存使用 01–09、31–39 分空档，
+实时 :00/:30、回补 :10/:40 原调度保持不变。默认冷存使用 01–09、31–39 分空档，
 锁被占用则跳过，并提前至少一分钟让行给下一次回补。每个空档最多完成当前日期的一个阶段，
 准备、复制、退役分轮执行。阶段回执保存在实时 state 文件同目录的
 `gefs-coldmove-checkpoint.json`（可通过 `coldmove_checkpoint` 配置覆盖），
 与原始回补状态独立；优先续跑已有回执日期。超时不会让已验证的前一阶段丢失。
-上述宿主机命令可加 `--dry-run` 在空档只列出候选，不复制与删除。
+上述宿主机命令可加 `--dry-run` 列出候选，保留已有回执和数据。
+
+启用实时配置 `parallel_coldmove: true` 后，冷存每次最多执行一个阶段，阶段预算为
+15 分钟。冷存脚本用 `<lock_file>.coldmove` 管理共享阶段回执，同时按起报日期使用与
+下载和切片共用的 `<lock_file>.<YYYYMMDD>`。拿到日期锁后重新读取完成回执，再调用
+核验、复制或热端回收。不同起报的下载和自动冷存可同时运行。
+
+先更新实时和回补的宿主机脚本（包括历史目录导入的 `gefs_run.py`），更新自动冷存及
+所有范围迁移脚本。保留原调度锁并等旧版任务结束，持有原调度锁时启用该配置。
+回滚时先让并行冷存退出，再关闭该配置并恢复调度脚本，复用已有冷盘文件和阶段回执。
 
 每日回补巡检在容器内运行以下只读入口，范围及成员数从实际 history.json / gefs.json 取得：
 
